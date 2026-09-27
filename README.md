@@ -147,3 +147,6 @@ Regenerate the documentation after changing a schema:
 ```sh
 mise exec -- tfplugindocs generate --provider-name metamcp
 ```
+
+`docs/` is committed and CI fails if it drifts from the schemas, so run the
+command above before opening a pull request.

@@ -1,2 +1,176 @@
 // Package provider implements the MetaMCP Terraform provider and its tests.
 package provider
+
+import (
+	"os"
+	"regexp"
+	"testing"
+
+	"github.com/hashicorp/terraform-plugin-framework/providerserver"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+)
+
+// Acceptance tests create real objects in a real MetaMCP, so they only run when
+// TF_ACC is set. The unit tests elsewhere in this package and in internal/client
+// cover the wire format and need nothing; these exist to prove the resources
+// round-trip against a live server, which mocks cannot establish.
+//
+//	export TF_ACC=1
+//	export METAMCP_ENDPOINT=https://metamcp.example.com
+//	export METAMCP_EMAIL=...
+//	export METAMCP_PASSWORD=...
+//	go test ./internal/provider/... -v -run TestAcc
+//
+// Every name below is prefixed "tf-acc-" so test debris is obvious, and the
+// framework destroys what each test creates.
+
+func protoV6ProviderFactories() map[string]func() (tfprotov6.ProviderServer, error) {
+	return map[string]func() (tfprotov6.ProviderServer, error){
+		"metamcp": providerserver.NewProtocol6WithError(New("test")()),
+	}
+}
+
+func requireAccEnv(t *testing.T) {
+	t.Helper()
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("set TF_ACC=1 to run acceptance tests against a live MetaMCP instance")
+	}
+	for _, v := range []string{"METAMCP_ENDPOINT", "METAMCP_EMAIL", "METAMCP_PASSWORD"} {
+		if os.Getenv(v) == "" {
+			t.Fatalf("%s must be set for acceptance tests", v)
+		}
+	}
+}
+
+func TestAccNamespaceResource(t *testing.T) {
+	requireAccEnv(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "metamcp_namespace" "test" {
+  name        = "tf-acc-namespace"
+  description = "created by terraform-provider-metamcp acceptance tests"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("metamcp_namespace.test", "name", "tf-acc-namespace"),
+					resource.TestCheckResourceAttrSet("metamcp_namespace.test", "uuid"),
+					resource.TestCheckResourceAttrSet("metamcp_namespace.test", "created_at"),
+				),
+			},
+			// Update, then confirm the value actually persisted rather than
+			// only appearing in state.
+			{
+				Config: `
+resource "metamcp_namespace" "test" {
+  name        = "tf-acc-namespace"
+  description = "updated by acceptance tests"
+}`,
+				Check: resource.TestCheckResourceAttr(
+					"metamcp_namespace.test", "description", "updated by acceptance tests"),
+			},
+			// Import, proving the import path handles a real UUID.
+			{
+				ResourceName:      "metamcp_namespace.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func TestAccMcpServerResource(t *testing.T) {
+	requireAccEnv(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "metamcp_mcp_server" "test" {
+  name = "tf-acc-server"
+  type = "STREAMABLE_HTTP"
+  url  = "https://example.com/mcp"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("metamcp_mcp_server.test", "name", "tf-acc-server"),
+					resource.TestCheckResourceAttr("metamcp_mcp_server.test", "type", "STREAMABLE_HTTP"),
+					resource.TestCheckResourceAttrSet("metamcp_mcp_server.test", "uuid"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccMcpServerStdioRequiresCommand checks that the provider reproduces the
+// API's own cross-field rule during plan, so the failure is attributed to the
+// right attribute instead of surfacing as a server-side validation error.
+func TestAccMcpServerStdioRequiresCommand(t *testing.T) {
+	requireAccEnv(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "metamcp_mcp_server" "test" {
+  name = "tf-acc-stdio"
+  type = "STDIO"
+}`,
+				ExpectError: regexp.MustCompile(`command is required when type is STDIO`),
+			},
+		},
+	})
+}
+
+func TestAccEndpointAndAPIKey(t *testing.T) {
+	requireAccEnv(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "metamcp_namespace" "test" {
+  name = "tf-acc-endpoint-ns"
+}
+
+resource "metamcp_endpoint" "test" {
+  name           = "tf-acc-endpoint"
+  namespace_uuid = metamcp_namespace.test.uuid
+}
+
+resource "metamcp_api_key" "test" {
+  name = "tf-acc-key"
+}
+
+data "metamcp_endpoint" "by_name" {
+  name       = metamcp_endpoint.test.name
+  depends_on = [metamcp_endpoint.test]
+}
+
+data "metamcp_api_key" "by_name" {
+  name       = metamcp_api_key.test.name
+  depends_on = [metamcp_api_key.test]
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("metamcp_endpoint.test", "uuid"),
+					resource.TestCheckResourceAttrSet("metamcp_endpoint.test", "url"),
+					resource.TestCheckResourceAttr("metamcp_api_key.test", "is_active", "true"),
+					// The key value must be populated at create time.
+					resource.TestCheckResourceAttrSet("metamcp_api_key.test", "key"),
+					// The data sources must agree with the resources they read.
+					resource.TestCheckResourceAttrPair(
+						"data.metamcp_endpoint.by_name", "uuid",
+						"metamcp_endpoint.test", "uuid"),
+					resource.TestCheckResourceAttrPair(
+						"data.metamcp_api_key.by_name", "key",
+						"metamcp_api_key.test", "key"),
+				),
+			},
+		},
+	})
+}
