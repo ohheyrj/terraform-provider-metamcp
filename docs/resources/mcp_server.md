@@ -56,12 +56,16 @@ resource "metamcp_mcp_server" "filesystem" {
 - `description` (String)
 - `env` (Map of String, Sensitive) Environment for a `STDIO` server. Marked sensitive because these routinely carry API keys.
 - `headers` (Map of String, Sensitive) Additional HTTP headers for a remote server. Marked sensitive because these routinely carry credentials.
+- `is_public` (Boolean) Whether the server is public, i.e. usable by every user rather than only its owner.
+
+MetaMCP encodes this as the absence of an owner, so setting it true clears ownership and setting it false claims the server for the authenticated user.
+
+The API does not report ownership for servers you do not own, so this is `Optional`+`Computed`: leave it unset to manage the other attributes without touching visibility.
 - `url` (String) Remote MCP endpoint. Required when `type` is `SSE` or `STREAMABLE_HTTP`.
 
 ### Read-Only
 
 - `created_at` (String)
-- `error_status` (String) Last connection error reported by MetaMCP, if any.
 - `uuid` (String)
 
 ## Import

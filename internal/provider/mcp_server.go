@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -52,7 +53,14 @@ type mcpServerResourceModel struct {
 	BearerToken types.String `tfsdk:"bearer_token"`
 	Headers     types.Map    `tfsdk:"headers"`
 	CreatedAt   types.String `tfsdk:"created_at"`
-	ErrorStatus types.String `tfsdk:"error_status"`
+
+	// IsPublic maps to the API's user_id field: MetaMCP has no explicit
+	// visibility flag, it treats a null user_id as "not owned by anyone", which
+	// is what makes an object public. Ownership is not returned for a server
+	// this provider did not create, so the attribute is Optional+Computed:
+	// unset means "leave whatever it is alone", and it is only sent when the
+	// value is actually changing.
+	IsPublic types.Bool `tfsdk:"is_public"`
 }
 
 func (r *mcpServerResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -131,12 +139,71 @@ func (r *mcpServerResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"error_status": schema.StringAttribute{
-				Computed:            true,
-				MarkdownDescription: "Last connection error reported by MetaMCP, if any.",
+			"is_public": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				MarkdownDescription: "Whether the server is public, i.e. usable by every " +
+					"user rather than only its owner.\n\n" +
+					"MetaMCP encodes this as the absence of an owner, so setting it " +
+					"true clears ownership and setting it false claims the server " +
+					"for the authenticated user.\n\n" +
+					"The API does not report ownership for servers you do not own, so " +
+					"this is `Optional`+`Computed`: leave it unset to manage the " +
+					"other attributes without touching visibility.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
+}
+
+// userIDForVisibility converts is_public into the API's ownership field.
+//
+// MetaMCP expresses visibility as ownership, and there is no visibility column:
+// a null user_id is what makes an object public. Three outcomes matter, and they
+// are not interchangeable:
+//
+//   - public  -> a pointer to the empty string, which clears the owner
+//   - private -> a pointer to the authenticated user's id
+//   - unset   -> nil, sending nothing, so the existing owner is left alone
+//
+// The distinction between "private" and "unset" is the important one. Sending
+// the empty string in place of nil would make every update public, and sending
+// nil in place of the user's id would fail to make anything private; both fail
+// silently, because either way the request is well formed.
+//
+// onCreate resolves only the null case: a new object has no owner to preserve,
+// so an unset is_public claims it for the authenticated user rather than
+// defaulting it to public. Omitting the attribute must never widen access.
+func userIDForVisibility(isPublic types.Bool, ownUserID string, onCreate bool) (*string, error) {
+	if isPublic.IsNull() || isPublic.IsUnknown() {
+		if !onCreate {
+			return nil, nil
+		}
+		if ownUserID == "" {
+			return nil, errors.New(
+				"cannot determine the authenticated user; set is_public explicitly, " +
+					"or check that the session reports a user id")
+		}
+		id := ownUserID
+		return &id, nil
+	}
+
+	if isPublic.ValueBool() {
+		empty := ""
+		return &empty, nil // public: clear the owner
+	}
+
+	// Private: the owner must be a real user id. The API passes user_id straight
+	// through to the database, so an empty string would be stored as a bogus
+	// owner rather than being resolved server-side.
+	if ownUserID == "" {
+		return nil, errors.New(
+			"cannot make the server private: the authenticated user id is unknown")
+	}
+	id := ownUserID
+	return &id, nil
 }
 
 func (r *mcpServerResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -196,6 +263,12 @@ func (r *mcpServerResource) Create(ctx context.Context, req resource.CreateReque
 		BearerToken: stringPtr(plan.BearerToken),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
+	owner, err := userIDForVisibility(plan.IsPublic, r.client.UserID(), true)
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(path.Root("is_public"), "Invalid visibility", err.Error())
+		return
+	}
+	in.UserID = owner
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -256,6 +329,17 @@ func (r *mcpServerResource) Update(ctx context.Context, req resource.UpdateReque
 		BearerToken: stringPtr(plan.BearerToken),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
+	// Ownership is sent only when the value is actually changing. A null user_id
+	// means *public* to this API, not "leave alone", so sending it on every
+	// update would quietly make every managed server public.
+	if !plan.IsPublic.Equal(state.IsPublic) {
+		owner, uerr := userIDForVisibility(plan.IsPublic, r.client.UserID(), false)
+		if uerr != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("is_public"), "Invalid visibility", uerr.Error())
+			return
+		}
+		in.UserID = owner
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -309,7 +393,11 @@ func applyMcpServer(ctx context.Context, m *mcpServerResourceModel, s *client.Mc
 	m.Command = stringOrNull(s.Command)
 	m.URL = stringOrNull(s.URL)
 	m.CreatedAt = types.StringValue(s.CreatedAt)
-	m.ErrorStatus = types.StringValue(s.ErrorStatus)
+	// MetaMCP has no visibility column: the serializer passes user_id straight
+	// through, and the server treats a null owner as public (see the
+	// `effectiveUserId === null` checks in its namespace implementation), so a
+	// nil owner here means public rather than "hidden from you".
+	m.IsPublic = types.BoolValue(s.UserID == nil)
 
 	if len(s.Args) > 0 || !m.Args.IsNull() {
 		m.Args = stringListValue(ctx, s.Args, &diags)

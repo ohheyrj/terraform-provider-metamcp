@@ -99,6 +99,11 @@ type Client struct {
 
 	mu       sync.Mutex
 	signedIn bool
+
+	// userID is the authenticated user's id, captured at sign-in. It is needed
+	// to make an object private: MetaMCP stores user_id verbatim rather than
+	// resolving it server-side, so the caller must supply the real id.
+	userID string
 }
 
 // New builds a Client from cfg.
@@ -195,7 +200,7 @@ func (c *Client) SignIn(ctx context.Context) error {
 	// error is discarded deliberately: the response is already fully read and
 	// nothing downstream depends on it.
 	defer func() { _ = resp.Body.Close() }()
-	loginBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	loginBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -214,7 +219,37 @@ func (c *Client) SignIn(ctx context.Context) error {
 	}
 
 	c.signedIn = true
+	if id := userIDFromBody(loginBody); id != "" {
+		c.userID = id
+	}
 	return nil
+}
+
+// userIDFromBody extracts user.id from a better-auth sign-in or get-session
+// response. Both are the same shape, and both are optional in the sense that a
+// failure to parse must not fail the sign-in itself.
+func userIDFromBody(body []byte) string {
+	var payload struct {
+		User *struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(body), &payload); err != nil {
+		return ""
+	}
+	if payload.User == nil {
+		return ""
+	}
+	return payload.User.ID
+}
+
+// UserID returns the authenticated user's id, empty if it is not known. It is
+// populated at sign-in and must not be guessed: an object made "private" with a
+// wrong or empty id is stored with a bogus owner.
+func (c *Client) UserID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.userID
 }
 
 // signInReason extracts the server's own error code/message from a failed

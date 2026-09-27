@@ -25,6 +25,11 @@ import (
 //   - namespaces.get returns servers, namespaces.list does not
 //   - update replaces mcpServerUuids wholesale
 //   - deletes report failure inside a 200 response body
+//
+// fakeUserID is the authenticated user the fake reports, and therefore the owner
+// it expects on anything made private.
+const fakeUserID = "user-0000-1111-2222-3333"
+
 type fakeMetaMCP struct {
 	*httptest.Server
 
@@ -61,7 +66,12 @@ func newFakeMetaMCP(t *testing.T) *fakeMetaMCP {
 	mux.HandleFunc("/api/auth/sign-in/email", func(w http.ResponseWriter, _ *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "better-auth.session_token", Value: "fake", Path: "/"})
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"email": "x"}})
+		// Shape as better-auth returns it, including user.id: the provider needs
+		// the real id to make an object private, since the API stores user_id
+		// verbatim rather than resolving it server-side.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user": map[string]any{"id": fakeUserID, "email": "test@example.com"},
+		})
 	})
 
 	mux.HandleFunc("/trpc/", func(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +267,11 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 			"bearerToken": in["bearerToken"],
 			"headers":     mapOrEmpty(in["headers"]),
 			"created_at":  "2026-01-01T00:00:00Z",
-			"user_id":     nil,
+			// Owned by the authenticated user unless the request clears it, which
+			// is how the real API records visibility.
+			"user_id": ownerFor(in["user_id"]),
+			// Present on every server the serializer returns.
+			"error_status": "NONE",
 		}
 		f.servers[id] = srv
 		return map[string]any{"success": true, "data": srv}, nil
@@ -271,6 +285,14 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 		srv["name"] = str("name")
 		srv["type"] = str("type")
 		srv["url"] = in["url"]
+		// Ownership follows the real rule: an ABSENT user_id keeps the existing
+		// owner, while an explicit null clears it. Distinguishing the two is the
+		// whole point of visibility, so a fake that ignored user_id here would
+		// hide a real bug — and one that treated absent as null would make every
+		// update public.
+		if v, ok := in["user_id"]; ok {
+			srv["user_id"] = ownerFor(v)
+		}
 		return map[string]any{"success": true, "data": srv}, nil
 
 	case "mcpServers.delete":
@@ -399,6 +421,21 @@ func (f *fakeMetaMCP) publicNamespace(ns map[string]any) map[string]any {
 func sliceOrEmpty(v any) any {
 	if v == nil {
 		return []any{}
+	}
+	return v
+}
+
+// ownerFor mirrors how the API records visibility: null user_id means public.
+// An explicit empty string clears the owner, and an absent key means "leave it".
+func ownerFor(v any) any {
+	if v == nil {
+		return nil
+	}
+	if s, ok := v.(string); ok {
+		if s == "" {
+			return nil // public
+		}
+		return s
 	}
 	return v
 }
