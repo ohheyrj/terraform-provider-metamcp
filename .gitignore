@@ -1,0 +1,26 @@
+# Binaries and build output
+terraform-provider-metamcp
+/dist/
+*.exe
+
+# Terraform working directories and state. State can contain the API key secret
+# this provider generates, so it must never be committed.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Test output
+coverage.txt
+*.out
+
+# Local tooling state
+mise.local.toml
+hk.local.pkl
+.DS_Store

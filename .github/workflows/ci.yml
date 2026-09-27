@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The same tools a developer gets from `mise install`, so CI and local
+      # runs cannot diverge.
+      - uses: jdx/mise-action@v2
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum || {
+            echo "::error::go.mod/go.sum are not tidy; run 'go mod tidy' and commit"
+            exit 1
+          }
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Unit tests only. They speak to a fake MetaMCP, so they need no
+      # credentials and touch no network — no METAMCP_* secret is referenced
+      # anywhere in this workflow.
+      - name: Test
+        run: go test ./... -race -coverprofile=coverage.txt
+
+      - name: Build
+        run: go build -o /dev/null .
+
+  docs:
+    name: docs are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: jdx/mise-action@v2
+
+      - name: Regenerate documentation
+        run: mise exec -- tfplugindocs generate --provider-name metamcp
+
+      # A schema change without regenerated docs is the common drift here, and
+      # the generated files are committed.
+      - name: Fail if documentation is out of date
+        run: |
+          if ! git diff --quiet; then
+            echo "::error::generated docs are out of date; run:"
+            echo "  mise exec -- tfplugindocs generate --provider-name metamcp"
+            git diff --stat
+            exit 1
+          fi
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan commits, not just the working tree.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

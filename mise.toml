@@ -1,0 +1,20 @@
+[tools]
+# --- build & test -----------------------------------------------------------------
+go = "1.25.8"            # the provider is Go; pinned to the module's `go` directive
+golangci-lint = "latest" # meta-linter, run by hk
+
+# --- git hooks --------------------------------------------------------------------
+# hk replaces pre-commit. One binary, steps run in parallel, Pkl-configured.
+hk = "latest"
+
+# --- docs & acceptance tests ------------------------------------------------------
+# tfplugindocs generates docs/ from the provider schemas and examples/, so the
+# published docs cannot drift from the code. terraform is used only by tests.
+# Note the tool name: tfplugindocs is the *binary*, but the registry entry is
+# `aqua:hashicorp/terraform-plugin-docs` — `tfplugindocs` alone is not in the
+# mise registry and, if used, fails resolution for every other tool in this file.
+terraform = "1.9.8"
+"aqua:hashicorp/terraform-plugin-docs" = "latest"
+
+# --- hygiene ----------------------------------------------------------------------
+gitleaks = "latest"      # secret scanning, wired as an hk step
