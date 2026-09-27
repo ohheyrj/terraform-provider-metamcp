@@ -108,6 +108,50 @@ resource "metamcp_mcp_server" "test" {
 // TestAccMcpServerStdioRequiresCommand checks that the provider reproduces the
 // API's own cross-field rule during plan, so the failure is attributed to the
 // right attribute instead of surfacing as a server-side validation error.
+// TestAccNamespaceServerAssociation proves the association round-trips: the
+// server is created, attached by UUID, read back, then detached.
+func TestAccNamespaceServerAssociation(t *testing.T) {
+	requireAccEnv(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		Steps: []resource.TestStep{
+			{
+				Config: `
+resource "metamcp_mcp_server" "attached" {
+  name = "tf-acc-attached"
+  type = "STREAMABLE_HTTP"
+  url  = "https://example.com/mcp"
+}
+
+resource "metamcp_namespace" "with_server" {
+  name             = "tf-acc-assoc"
+  mcp_server_uuids = [metamcp_mcp_server.attached.uuid]
+}`,
+				Check: resource.TestCheckResourceAttrPair(
+					"metamcp_namespace.with_server", "mcp_server_uuids.0",
+					"metamcp_mcp_server.attached", "uuid"),
+			},
+			// Detaching must be reflected, not ignored.
+			{
+				Config: `
+resource "metamcp_mcp_server" "attached" {
+  name = "tf-acc-attached"
+  type = "STREAMABLE_HTTP"
+  url  = "https://example.com/mcp"
+}
+
+resource "metamcp_namespace" "with_server" {
+  name             = "tf-acc-assoc"
+  mcp_server_uuids = []
+}`,
+				Check: resource.TestCheckResourceAttr(
+					"metamcp_namespace.with_server", "mcp_server_uuids.#", "0"),
+			},
+		},
+	})
+}
+
 func TestAccMcpServerStdioRequiresCommand(t *testing.T) {
 	requireAccEnv(t)
 

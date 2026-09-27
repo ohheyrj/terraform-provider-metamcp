@@ -35,6 +35,11 @@ const (
 // ---------------------------------------------------------------------------
 
 // Namespace is NamespaceSchema.
+//
+// Servers is populated only by GetNamespace: the API's namespaces.get returns a
+// NamespaceWithServersSchema (namespace plus its associated servers), whereas
+// namespaces.list returns bare namespaces with no servers array at all. Treat a
+// nil Servers as "not requested", not as "no servers associated".
 type Namespace struct {
 	UUID        string  `json:"uuid"`
 	Name        string  `json:"name"`
@@ -42,6 +47,9 @@ type Namespace struct {
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 	UserID      *string `json:"user_id"`
+
+	// Servers is present only on responses from namespaces.get.
+	Servers []McpServer `json:"servers,omitempty"`
 }
 
 // NamespaceInput is CreateNamespaceRequestSchema / UpdateNamespaceRequestSchema.

@@ -390,3 +390,112 @@ func TestEndpointRequired(t *testing.T) {
 		t.Errorf("error should say the endpoint is required, got: %v", err)
 	}
 }
+
+// TestNamespaceServersFromGetOnly pins the asymmetry that makes the namespace
+// association easy to get wrong: namespaces.get returns the associated servers,
+// namespaces.list does not. A client that assumes list is complete would
+// conclude a namespace has no servers.
+func TestNamespaceServersFromGetOnly(t *testing.T) {
+	ts := newTestServer(t)
+
+	server := map[string]any{
+		"uuid": "11111111-1111-1111-1111-111111111111", "name": "github",
+		"description": nil, "type": "STREAMABLE_HTTP", "command": nil,
+		"args": []string{}, "env": map[string]string{},
+		"url": "https://example.com/mcp", "created_at": "2026-01-01",
+		"bearerToken": nil, "headers": map[string]string{}, "user_id": nil,
+	}
+
+	// get: namespace WITH its servers
+	ts.responders["namespaces.get"] = map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "tools",
+			"description": nil, "created_at": "t", "updated_at": "t", "user_id": nil,
+			"servers": []any{server},
+		},
+	}
+	// list: bare namespaces, no servers key at all
+	ts.responders["namespaces.list"] = map[string]any{
+		"success": true,
+		"data": []any{map[string]any{
+			"uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "tools",
+			"description": nil, "created_at": "t", "updated_at": "t", "user_id": nil,
+		}},
+	}
+
+	c := ts.client(t)
+
+	got, err := c.GetNamespace(context.Background(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatalf("GetNamespace: %v", err)
+	}
+	if got.Servers == nil {
+		t.Fatal("GetNamespace must decode the servers array")
+	}
+	if len(got.Servers) != 1 || got.Servers[0].UUID != server["uuid"] {
+		t.Fatalf("unexpected servers: %+v", got.Servers)
+	}
+
+	list, err := c.ListNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("ListNamespaces: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 namespace, got %d", len(list))
+	}
+	// nil, not an empty slice: the caller must be able to tell "no servers
+	// reported" from "no servers associated".
+	if list[0].Servers != nil {
+		t.Errorf("list should carry no servers; got %+v", list[0].Servers)
+	}
+}
+
+// TestNamespaceAssociationRoundTrip checks that mcpServerUuids is sent on both
+// create and update, since an update that omits it would silently detach every
+// server from the namespace.
+func TestNamespaceAssociationRoundTrip(t *testing.T) {
+	ts := newTestServer(t)
+	ts.responders["namespaces.create"] = map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "n",
+			"description": nil, "created_at": "t", "updated_at": "t", "user_id": nil,
+		},
+	}
+	ts.responders["namespaces.update"] = ts.responders["namespaces.create"]
+
+	c := ts.client(t)
+	uuids := []string{
+		"11111111-1111-1111-1111-111111111111",
+		"22222222-2222-2222-2222-222222222222",
+	}
+	if _, err := c.CreateNamespace(context.Background(), NamespaceInput{
+		Name: "n", McpServerUUIDs: uuids,
+	}); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	if _, err := c.UpdateNamespace(context.Background(),
+		"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		NamespaceInput{Name: "n", McpServerUUIDs: uuids}); err != nil {
+		t.Fatalf("UpdateNamespace: %v", err)
+	}
+
+	var sawCreate, sawUpdate bool
+	want := `"mcpServerUuids":["` + uuids[0] + `","` + uuids[1] + `"]`
+	for _, call := range ts.calls {
+		if strings.HasPrefix(call, "POST namespaces.create ") && strings.Contains(call, want) {
+			sawCreate = true
+		}
+		if strings.HasPrefix(call, "POST namespaces.update ") && strings.Contains(call, want) &&
+			strings.Contains(call, `"uuid":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"`) {
+			sawUpdate = true
+		}
+	}
+	if !sawCreate {
+		t.Errorf("create did not send mcpServerUuids; calls: %v", ts.calls)
+	}
+	if !sawUpdate {
+		t.Errorf("update did not send mcpServerUuids (would detach servers); calls: %v", ts.calls)
+	}
+}

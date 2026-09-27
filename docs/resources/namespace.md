@@ -22,6 +22,11 @@ Manages a MetaMCP namespace: a grouping of MCP servers published together behind
 ### Optional
 
 - `description` (String) Free-text description.
+- `mcp_server_uuids` (Set of String) UUIDs of the MCP servers associated with this namespace.
+
+Reference `metamcp_mcp_server.<name>.uuid` here to attach a server. Servers are attached by UUID, so this resource does not need to depend on the server's other attributes.
+
+Note that the association is *authoritative*: removing a UUID from this set detaches that server, including one attached outside Terraform.
 
 ### Read-Only
 

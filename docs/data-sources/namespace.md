@@ -24,4 +24,5 @@ Looks up an existing MetaMCP namespace by name or UUID.
 
 - `created_at` (String)
 - `description` (String) Free-text description.
+- `mcp_server_uuids` (Set of String) UUIDs of the MCP servers associated with this namespace.
 - `updated_at` (String)

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	dsschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -23,6 +24,8 @@ type namespaceDataSourceModel struct {
 	Description types.String `tfsdk:"description"`
 	CreatedAt   types.String `tfsdk:"created_at"`
 	UpdatedAt   types.String `tfsdk:"updated_at"`
+
+	McpServerUUIDs types.Set `tfsdk:"mcp_server_uuids"`
 }
 
 type namespaceDataSource struct {
@@ -61,6 +64,11 @@ func (d *namespaceDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 			},
 			"updated_at": dsschema.StringAttribute{
 				Computed: true,
+			},
+			"mcp_server_uuids": dsschema.SetAttribute{
+				Computed:            true,
+				ElementType:         types.StringType,
+				MarkdownDescription: "UUIDs of the MCP servers associated with this namespace.",
 			},
 		},
 	}
@@ -127,10 +135,30 @@ func (d *namespaceDataSource) Read(ctx context.Context, req datasource.ReadReque
 		}
 	}
 
+	// A lookup by name goes through namespaces.list, which returns no servers
+	// array. Re-fetch by UUID so the association is populated either way.
+	if found.Servers == nil {
+		if withServers, err := d.client.GetNamespace(ctx, found.UUID); err == nil {
+			found = withServers
+		}
+	}
+
 	config.UUID = types.StringValue(found.UUID)
 	config.Name = types.StringValue(found.Name)
 	config.Description = stringOrNull(found.Description)
 	config.CreatedAt = types.StringValue(found.CreatedAt)
 	config.UpdatedAt = types.StringValue(found.UpdatedAt)
+
+	if found.Servers != nil {
+		uuids := make([]string, 0, len(found.Servers))
+		for _, srv := range found.Servers {
+			uuids = append(uuids, srv.UUID)
+		}
+		sort.Strings(uuids)
+		v, d := types.SetValueFrom(ctx, types.StringType, uuids)
+		resp.Diagnostics.Append(d...)
+		config.McpServerUUIDs = v
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &config)...)
 }

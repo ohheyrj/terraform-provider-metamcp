@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"os"
+	"sort"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -258,6 +259,19 @@ func stringList(ctx context.Context, l types.List, diags *diag.Diagnostics) []st
 	}
 	out := []string{}
 	diags.Append(l.ElementsAs(ctx, &out, false)...)
+	return out
+}
+
+// stringSet converts a Terraform set to a sorted Go slice. Sorting keeps the
+// value stable between reads, which matters because this is sent to the API on
+// every write and compared on every read.
+func stringSet(ctx context.Context, v types.Set, diags *diag.Diagnostics) []string {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	out := []string{}
+	diags.Append(v.ElementsAs(ctx, &out, false)...)
+	sort.Strings(out)
 	return out
 }
 

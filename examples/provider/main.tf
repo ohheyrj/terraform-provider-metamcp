@@ -14,6 +14,13 @@ provider "metamcp" {
 resource "metamcp_namespace" "example" {
   name        = "example"
   description = "Managed by Terraform"
+
+  # Attach servers by UUID. Terraform creates the servers first, then associates
+  # them; the association is authoritative, so removing a UUID detaches it.
+  mcp_server_uuids = [
+    metamcp_mcp_server.remote.uuid,
+    metamcp_mcp_server.local.uuid,
+  ]
 }
 
 resource "metamcp_mcp_server" "remote" {
