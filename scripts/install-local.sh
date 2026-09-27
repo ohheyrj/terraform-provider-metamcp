@@ -30,9 +30,12 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-# The version string is reported to the server's user agent, so a dev build
-# identifies itself as such rather than impersonating a release.
-"${GO[@]}" build -ldflags "-X main.version=dev" \
+# -trimpath keeps the build reproducible. Without it the build directory is
+# embedded, so two builds of identical source differ and "is my installed binary
+# current?" cannot be answered by comparing the files. The version string is
+# reported to the server's user agent, so a dev build says so rather than
+# impersonating a release.
+"${GO[@]}" build -trimpath -ldflags "-X main.version=dev" \
 	-o "$INSTALL_DIR/terraform-provider-metamcp" .
 
 echo "installed: $INSTALL_DIR/terraform-provider-metamcp"
