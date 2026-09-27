@@ -18,3 +18,4 @@ terraform = "1.9.8"
 
 # --- hygiene ----------------------------------------------------------------------
 gitleaks = "latest"      # secret scanning, wired as an hk step
+shfmt = "latest"         # formats scripts/, wired as an hk check
