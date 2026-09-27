@@ -66,29 +66,52 @@ out. A password is a long-lived credential that is valid until changed. Copy the
 cookie from the MetaMCP web UI under DevTools → Application → Cookies →
 `better-auth.session_token`.
 
+## How the resources relate
+
+MetaMCP's model is four objects, and the dependency direction is worth stating
+because it is not obvious from the names:
+
+- **`metamcp_mcp_server`** — one MCP server: a local process (`STDIO`) or a
+  remote service (`SSE`, `STREAMABLE_HTTP`).
+- **`metamcp_namespace`** — a group of servers. **A server belongs to a
+  namespace through the namespace's `mcp_server_uuids`**, not the other way
+  round. That association is authoritative: removing a UUID detaches the server.
+- **`metamcp_endpoint`** — the URL clients connect to. It publishes *one*
+  namespace, and derives its URL from its own name.
+- **`metamcp_api_key`** — a credential for MCP clients. It is scoped to a user,
+  **not to an endpoint**: the API has no endpoint field on a key, so one key is
+  not limited to one endpoint.
+
+So the shape is: servers → collected into a namespace → published by an
+endpoint → reached with an API key.
+
 ## Resources and data sources
 
 | Resource | Purpose |
 |---|---|
 | `metamcp_namespace` | A group of MCP servers published together |
 | `metamcp_mcp_server` | A `STDIO`, `SSE` or `STREAMABLE_HTTP` MCP server |
-| `metamcp_endpoint` | The URL MCP clients connect to, exposing a namespace |
-| `metamcp_api_key` | A key for authenticating MCP clients to an endpoint |
+| `metamcp_endpoint` | The URL MCP clients connect to, publishing one namespace |
+| `metamcp_api_key` | A credential for MCP clients |
 
 Each has a matching data source for looking up existing objects by name or UUID.
+All four resources support `terraform import`, using the object's UUID as the
+import ID; each has a per-resource page under [`docs/`](docs) with an example
+and the exact import command.
 
 ## Example
 
 ```hcl
-resource "metamcp_namespace" "tools" {
-  name        = "tools"
-  description = "Shared internal tooling"
-}
-
 resource "metamcp_mcp_server" "github" {
   name = "github"
   type = "STREAMABLE_HTTP"
   url  = "https://api.githubcopilot.com/mcp/"
+}
+
+resource "metamcp_namespace" "tools" {
+  name             = "tools"
+  description      = "Shared internal tooling"
+  mcp_server_uuids = [metamcp_mcp_server.github.uuid]
 }
 
 resource "metamcp_endpoint" "tools" {
@@ -125,22 +148,29 @@ Tooling comes from [mise](https://mise.jdx.dev) and git hooks from
 ```sh
 mise install          # go, golangci-lint, terraform, tfplugindocs, gitleaks, hk
 hk check --all        # lint and vet the repository
-go test ./...         # unit tests, no live instance required
+go test ./...         # all tests, no live instance required
 ```
 
-The unit tests run against a fake MetaMCP that asserts the exact wire format, so
-they need no credentials and reach no network.
+`go test ./...` runs the complete suite with no credentials and no network. It
+includes resource and data-source tests through the real Terraform plugin
+protocol, which run against an in-process fake MetaMCP that reproduces the
+envelope, the API's asymmetries and its error shapes.
 
-Acceptance tests, which **do** create real objects, are gated behind the
-standard Terraform flag and require a live instance:
+To run those same tests against a **live** MetaMCP instead — which creates and
+destroys real objects — opt in explicitly:
 
 ```sh
-export TF_ACC=1
+export METAMCP_LIVE_ACC=1
 export METAMCP_ENDPOINT="https://metamcp.example.com"
 export METAMCP_EMAIL="admin@example.com"
 export METAMCP_PASSWORD="..."
 go test ./internal/provider/... -v
 ```
+
+Live mode is opt-in so that a real instance can never be touched by accident.
+Only a live run can confirm that the field names this provider sends match what
+the real server accepts; the fake encodes the same beliefs, so it cannot falsify
+them.
 
 Regenerate the documentation after changing a schema:
 
