@@ -31,23 +31,30 @@ func protoV6ProviderFactories() map[string]func() (tfprotov6.ProviderServer, err
 	}
 }
 
-func requireAccEnv(t *testing.T) {
+// requireFakeOrLive returns the provider factories to use, starting a fake
+// MetaMCP unless live mode was explicitly requested.
+func requireFakeOrLive(t *testing.T) map[string]func() (tfprotov6.ProviderServer, error) {
 	t.Helper()
-	if os.Getenv("TF_ACC") == "" {
-		t.Skip("set TF_ACC=1 to run acceptance tests against a live MetaMCP instance")
+
+	if os.Getenv("METAMCP_LIVE_ACC") == "" {
+		return fakeProviderFactories(newFakeMetaMCP(t).URL)
 	}
+
 	for _, v := range []string{"METAMCP_ENDPOINT", "METAMCP_EMAIL", "METAMCP_PASSWORD"} {
 		if os.Getenv(v) == "" {
-			t.Fatalf("%s must be set for acceptance tests", v)
+			t.Fatalf("%s must be set when METAMCP_LIVE_ACC=1", v)
 		}
 	}
+	// Live tests must not silently fall back to fake credentials.
+	_ = os.Unsetenv("METAMCP_USERNAME")
+	return protoV6ProviderFactories()
 }
 
 func TestAccNamespaceResource(t *testing.T) {
-	requireAccEnv(t)
+	factories := requireFakeOrLive(t)
 
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{
 				Config: `
@@ -74,19 +81,21 @@ resource "metamcp_namespace" "test" {
 			},
 			// Import, proving the import path handles a real UUID.
 			{
-				ResourceName:      "metamcp_namespace.test",
-				ImportState:       true,
-				ImportStateVerify: true,
+				ResourceName:                         "metamcp_namespace.test",
+				ImportState:                          true,
+				ImportStateIdFunc:                    importByUUID("metamcp_namespace.test"),
+				ImportStateVerify:                    true,
+				ImportStateVerifyIdentifierAttribute: "uuid",
 			},
 		},
 	})
 }
 
 func TestAccMcpServerResource(t *testing.T) {
-	requireAccEnv(t)
+	factories := requireFakeOrLive(t)
 
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{
 				Config: `
@@ -105,16 +114,13 @@ resource "metamcp_mcp_server" "test" {
 	})
 }
 
-// TestAccMcpServerStdioRequiresCommand checks that the provider reproduces the
-// API's own cross-field rule during plan, so the failure is attributed to the
-// right attribute instead of surfacing as a server-side validation error.
 // TestAccNamespaceServerAssociation proves the association round-trips: the
 // server is created, attached by UUID, read back, then detached.
 func TestAccNamespaceServerAssociation(t *testing.T) {
-	requireAccEnv(t)
+	factories := requireFakeOrLive(t)
 
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{
 				Config: `
@@ -153,10 +159,10 @@ resource "metamcp_namespace" "with_server" {
 }
 
 func TestAccMcpServerStdioRequiresCommand(t *testing.T) {
-	requireAccEnv(t)
+	factories := requireFakeOrLive(t)
 
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{
 				Config: `
@@ -171,10 +177,10 @@ resource "metamcp_mcp_server" "test" {
 }
 
 func TestAccEndpointAndAPIKey(t *testing.T) {
-	requireAccEnv(t)
+	factories := requireFakeOrLive(t)
 
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories(),
+		ProtoV6ProviderFactories: factories,
 		Steps: []resource.TestStep{
 			{
 				Config: `

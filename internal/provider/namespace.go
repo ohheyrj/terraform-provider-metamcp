@@ -26,8 +26,12 @@ var (
 	_ resource.ResourceWithConfigure   = &namespaceResource{}
 	_ resource.ResourceWithImportState = &namespaceResource{}
 
-	// uuidPattern matches the UUID shape the API returns and accepts.
-	uuidPattern = regexp.MustCompile(`^[0-9a-fA-F-]{32,36}$`)
+	// uuidPattern matches the canonical UUID the API accepts (z.string().uuid()).
+	// An earlier, looser pattern here accepted dashless hex and even strings of
+	// dashes, so a typo produced a confusing error from the API rather than a
+	// clear one from the provider.
+	uuidPattern = regexp.MustCompile(
+		`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 // NewNamespaceResource returns a new metamcp_namespace resource.
