@@ -161,6 +161,14 @@ func (c *Client) SignIn(ctx context.Context) error {
 		return errors.New("metamcp: no credentials supplied: set email and password, or cookie")
 	}
 
+	// The session cookie is already in the jar, so there is nothing to do. This
+	// guard matters more than it looks: without it every API call signs in
+	// again, which is both wasteful and enough traffic to trip better-auth's
+	// rate limiter during a plan that reads a handful of data sources.
+	if c.signedIn {
+		return nil
+	}
+
 	// A failed login response can reflect the submitted input, so the body is
 	// never included in an error — only the status.
 	body, err := json.Marshal(map[string]string{
@@ -187,7 +195,7 @@ func (c *Client) SignIn(ctx context.Context) error {
 	// error is discarded deliberately: the response is already fully read and
 	// nothing downstream depends on it.
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	loginBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -195,13 +203,43 @@ func (c *Client) SignIn(ctx context.Context) error {
 	case http.StatusTooManyRequests:
 		return ErrRateLimited
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("%w: sign-in rejected (HTTP %d)", ErrUnauthorized, resp.StatusCode)
+		// better-auth reports a machine-readable code such as
+		// INVALID_EMAIL_OR_PASSWORD. It reflects the submitted input only as far
+		// as "these do not match", so it is safe to surface, and it separates
+		// "wrong password" from "this account does not exist".
+		return fmt.Errorf("%w: %s", ErrUnauthorized, signInReason(loginBody, resp.StatusCode))
 	default:
-		return fmt.Errorf("metamcp: sign-in failed (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("metamcp: sign-in failed (HTTP %d): %s",
+			resp.StatusCode, signInReason(loginBody, resp.StatusCode))
 	}
 
 	c.signedIn = true
 	return nil
+}
+
+// signInReason extracts the server's own error code/message from a failed
+// sign-in response, falling back to the status code. better-auth returns JSON
+// such as {"code":"INVALID_EMAIL_OR_PASSWORD","message":"Invalid email or
+// password"}; those strings describe the attempt, never the credentials.
+func signInReason(body []byte, status int) string {
+	var e struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(body), &e); err == nil {
+		switch {
+		case e.Code != "" && e.Message != "":
+			return fmt.Sprintf("HTTP %d %s: %s", status, e.Code, e.Message)
+		case e.Code != "":
+			return fmt.Sprintf("HTTP %d %s", status, e.Code)
+		case e.Message != "":
+			return fmt.Sprintf("HTTP %d: %s", status, e.Message)
+		}
+	}
+	if len(body) > 0 {
+		return fmt.Sprintf("HTTP %d: %s", status, truncate(string(body), 200))
+	}
+	return fmt.Sprintf("HTTP %d", status)
 }
 
 // tRPCError is an error returned by the server in a tRPC envelope.

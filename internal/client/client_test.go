@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -497,5 +498,97 @@ func TestNamespaceAssociationRoundTrip(t *testing.T) {
 	}
 	if !sawUpdate {
 		t.Errorf("update did not send mcpServerUuids (would detach servers); calls: %v", ts.calls)
+	}
+}
+
+// TestSignInHappensOnce pins the guard that was missing: SignIn must be a no-op
+// after a successful login. Without it every API call re-authenticates, which is
+// both wasteful and enough traffic to trip better-auth's rate limiter during a
+// plan that reads several data sources.
+func TestSignInHappensOnce(t *testing.T) {
+	var mu sync.Mutex
+	var signIns, calls int
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(r.URL.Path, "sign-in") {
+			signIns++
+			http.SetCookie(w, &http.Cookie{Name: "better-auth.session_token", Value: "x", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		calls++
+		_, _ = w.Write([]byte(`[{"result":{"data":{"success":true,"data":[]}}}]`))
+	}))
+	defer ts.Close()
+
+	c, err := New(Config{Endpoint: ts.URL, Email: "a@b.c", Password: "pw"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := c.ListNamespaces(context.Background()); err != nil {
+			t.Fatalf("ListNamespaces %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if signIns != 1 {
+		t.Errorf("expected exactly 1 sign-in for 5 calls, got %d", signIns)
+	}
+	if calls != 5 {
+		t.Errorf("expected 5 API calls, got %d", calls)
+	}
+}
+
+// TestSignInFailureReportsServerReason checks that a failed login surfaces the
+// server's own error code, so "wrong password" is distinguishable from
+// "unknown account" without guessing.
+func TestSignInFailureReportsServerReason(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"INVALID_EMAIL_OR_PASSWORD","message":"Invalid email or password"}`))
+	}))
+	defer ts.Close()
+
+	c, err := New(Config{Endpoint: ts.URL, Email: "a@b.c", Password: "wrong"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = c.SignIn(context.Background())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Errorf("expected ErrUnauthorized, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "INVALID_EMAIL_OR_PASSWORD") {
+		t.Errorf("error should name the server's code, got: %v", err)
+	}
+	// The submitted credential must never be echoed back.
+	if strings.Contains(err.Error(), "wrong") {
+		t.Errorf("error leaked the submitted password: %v", err)
+	}
+}
+
+// TestRateLimitIsDistinct covers the case that sends people looking in the wrong
+// place: a 429 on login reads as "bad password" unless it is called out.
+func TestRateLimitIsDistinct(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"Too many requests. Please try again later."}`))
+	}))
+	defer ts.Close()
+
+	c, err := New(Config{Endpoint: ts.URL, Email: "a@b.c", Password: "pw"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := c.SignIn(context.Background()); !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected ErrRateLimited, got %v", err)
 	}
 }
