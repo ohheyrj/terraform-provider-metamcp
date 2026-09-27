@@ -288,16 +288,18 @@ func (c *Client) callRaw(ctx context.Context, proc string, input any, out any) e
 		return fmt.Errorf("metamcp: encoding input for %s: %w", proc, err)
 	}
 
-	// Batch-of-one body carrying the input DIRECTLY.
+	// Batch-of-one envelope. The shape is Record<batchIndex, input>, and the
+	// batch index is REQUIRED whenever batch=1 is set — dropping it makes tRPC
+	// look up input["0"] of the input itself and see nothing at all.
 	//
-	// MetaMCP calls initTRPC.context<...>().create() with no `transformer`, so
-	// tRPC expects the plain input. The {"0":{"json":...}} wrapper is superjson's
-	// shape, which is only correct when a transformer is configured: with one
-	// absent the server receives the envelope as the input object, finds no
-	// `uuid` key, and rejects the call with
-	//   invalid_type: expected "string", received "undefined", path ["uuid"]
-	// A batch param of 1 still applies — that is separate from the wrapper.
-	body := string(raw)
+	// The inner `json` key is a *transformer slot*, and its presence depends on
+	// the server: MetaMCP calls initTRPC.context<BaseContext>().create() with no
+	// `transformer`, so the input goes in directly. With superjson it would be
+	// {"0":{"json":<input>}}. Getting this wrong is confusing, because both
+	// failures arrive as a 400 on a protected procedure:
+	//   {"0":{"json":X}}  -> input is the envelope  -> invalid_type, path ["uuid"]
+	//   X                 -> input is undefined     -> invalid_type, path []
+	body := fmt.Sprintf(`{"0":%s}`, raw)
 
 	var req *http.Request
 	if isMutation(proc) {

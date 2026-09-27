@@ -98,7 +98,11 @@ func newTestServer(t *testing.T) *testServer {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			input = raw
+			input, err = unwrapBatch(raw)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		} else {
 			// Mutations must POST the envelope as the body.
 			raw, err := io.ReadAll(r.Body)
@@ -106,7 +110,11 @@ func newTestServer(t *testing.T) *testServer {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			input = string(raw)
+			input, err = unwrapBatch(string(raw))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		ts.calls = append(ts.calls, fmt.Sprintf("%s %s %s", r.Method, proc, input))
@@ -149,6 +157,30 @@ func (s *testServer) client(t *testing.T) *Client {
 	return c
 }
 
+// unwrapBatch applies tRPC's batch rule the way the MetaMCP server does.
+//
+// The body is Record<batchIndex, input>, so the index is REQUIRED. The inner
+// `json` key is a transformer slot that must be absent here, because MetaMCP
+// configures no transformer. Enforcing this rather than tolerating either shape
+// is what makes the test able to catch a wire-format regression.
+func unwrapBatch(raw string) (string, error) {
+	var batch map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &batch); err != nil {
+		return "", fmt.Errorf("input is not a batch object: %w", err)
+	}
+	entry, ok := batch["0"]
+	if !ok {
+		return "", errors.New("batch index 0 missing")
+	}
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(entry, &probe) == nil {
+		if _, wrapped := probe["json"]; wrapped {
+			return "", errors.New("input is superjson-wrapped but the server has no transformer")
+		}
+	}
+	return string(entry), nil
+}
+
 func TestSignInAndQueryFormat(t *testing.T) {
 	ts := newTestServer(t)
 	ts.responders["namespaces.list"] = map[string]any{
@@ -181,13 +213,9 @@ func TestSignInAndQueryFormat(t *testing.T) {
 	if !strings.HasPrefix(last, "GET namespaces.list ") {
 		t.Errorf("expected a GET for a query, got %q", last)
 	}
-	// The test server records the DECODED ?input= value, so this is the body as
-	// the server receives it: no wrapper, just the input.
+	// The server records the unwrapped input, so a null input appears as null.
 	if !strings.HasSuffix(last, " null") {
-		t.Errorf("query should carry a bare null input, got %q", last)
-	}
-	if strings.Contains(last, `"json"`) {
-		t.Errorf("input must not be superjson-wrapped (server has no transformer): %q", last)
+		t.Errorf("query should carry a null input, got %q", last)
 	}
 }
 

@@ -79,11 +79,35 @@ func newFakeMetaMCP(t *testing.T) *fakeMetaMCP {
 			raw = string(buf)
 		}
 
-		// The input is sent directly: MetaMCP configures no tRPC transformer, so
-		// there is no {"0":{"json":...}} wrapper to unwrap.
+		// Mirror tRPC's batch rule rather than accommodating whatever the client
+		// sends. The body must be Record<batchIndex, input>: the index is
+		// required, and the inner `json` key is a transformer slot that must be
+		// ABSENT here because MetaMCP configures no transformer. A fake that
+		// accepted either shape would agree with the client and hide exactly the
+		// bug this reproduces.
 		var input map[string]any
 		if raw != "" {
-			_ = json.Unmarshal([]byte(raw), &input)
+			var batch map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &batch); err != nil {
+				f.fail(w, fmt.Sprintf("input is not a batch object: %v", err))
+				return
+			}
+			entry, ok := batch["0"]
+			if !ok {
+				f.fail(w, "batch index 0 missing (tRPC requires Record<index, input> with batch=1)")
+				return
+			}
+			var probe map[string]json.RawMessage
+			if json.Unmarshal(entry, &probe) == nil {
+				if _, wrapped := probe["json"]; wrapped {
+					f.fail(w, "input is superjson-wrapped but the server configures no transformer")
+					return
+				}
+			}
+			if err := json.Unmarshal(entry, &input); err != nil {
+				f.fail(w, fmt.Sprintf("decoding input: %v", err))
+				return
+			}
 		}
 
 		f.mu.Lock()
@@ -107,6 +131,19 @@ func newFakeMetaMCP(t *testing.T) *fakeMetaMCP {
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
+}
+
+// fail rejects a request the way the real server does, so an invalid wire format
+// surfaces as the same 400 a live instance would produce instead of being
+// silently accommodated.
+func (f *fakeMetaMCP) fail(w http.ResponseWriter, why string) {
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode([]any{map[string]any{
+		"error": map[string]any{
+			"message": why, "code": -32600,
+			"data": map[string]any{"code": "BAD_REQUEST", "httpStatus": 400},
+		},
+	}})
 }
 
 func (f *fakeMetaMCP) nextUUID() string {
