@@ -79,16 +79,11 @@ func newFakeMetaMCP(t *testing.T) *fakeMetaMCP {
 			raw = string(buf)
 		}
 
+		// The input is sent directly: MetaMCP configures no tRPC transformer, so
+		// there is no {"0":{"json":...}} wrapper to unwrap.
 		var input map[string]any
 		if raw != "" {
-			var env map[string]struct {
-				JSON json.RawMessage `json:"json"`
-			}
-			if err := json.Unmarshal([]byte(raw), &env); err == nil {
-				if e, ok := env["0"]; ok && len(e.JSON) > 0 {
-					_ = json.Unmarshal(e.JSON, &input)
-				}
-			}
+			_ = json.Unmarshal([]byte(raw), &input)
 		}
 
 		f.mu.Lock()

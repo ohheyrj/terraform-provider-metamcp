@@ -288,19 +288,27 @@ func (c *Client) callRaw(ctx context.Context, proc string, input any, out any) e
 		return fmt.Errorf("metamcp: encoding input for %s: %w", proc, err)
 	}
 
-	// Batch-of-one envelope: {"0":{"json":<input>}}
-	envelope := fmt.Sprintf(`{"0":{"json":%s}}`, raw)
+	// Batch-of-one body carrying the input DIRECTLY.
+	//
+	// MetaMCP calls initTRPC.context<...>().create() with no `transformer`, so
+	// tRPC expects the plain input. The {"0":{"json":...}} wrapper is superjson's
+	// shape, which is only correct when a transformer is configured: with one
+	// absent the server receives the envelope as the input object, finds no
+	// `uuid` key, and rejects the call with
+	//   invalid_type: expected "string", received "undefined", path ["uuid"]
+	// A batch param of 1 still applies — that is separate from the wrapper.
+	body := string(raw)
 
 	var req *http.Request
 	if isMutation(proc) {
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost,
-			c.endpoint+"/trpc/frontend."+proc+"?batch=1", strings.NewReader(envelope))
+			c.endpoint+"/trpc/frontend."+proc+"?batch=1", strings.NewReader(body))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 	} else {
 		req, err = http.NewRequestWithContext(ctx, http.MethodGet,
-			c.endpoint+"/trpc/frontend."+proc+"?batch=1&input="+url.QueryEscape(envelope), nil)
+			c.endpoint+"/trpc/frontend."+proc+"?batch=1&input="+url.QueryEscape(body), nil)
 	}
 	if err != nil {
 		return fmt.Errorf("metamcp: building request for %s: %w", proc, err)

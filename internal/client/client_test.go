@@ -174,13 +174,20 @@ func TestSignInAndQueryFormat(t *testing.T) {
 		t.Error("no session cookie was sent with the tRPC request")
 	}
 
-	// A query must be a GET carrying {"0":{"json":null}}.
+	// A query must be a GET carrying the input directly. MetaMCP configures no
+	// tRPC transformer, so the superjson {"0":{"json":...}} wrapper is wrong:
+	// the server would read the envelope itself as the input object.
 	last := ts.calls[len(ts.calls)-1]
 	if !strings.HasPrefix(last, "GET namespaces.list ") {
 		t.Errorf("expected a GET for a query, got %q", last)
 	}
-	if !strings.Contains(last, `{"0":{"json":null}}`) {
-		t.Errorf("query envelope wrong: %q", last)
+	// The test server records the DECODED ?input= value, so this is the body as
+	// the server receives it: no wrapper, just the input.
+	if !strings.HasSuffix(last, " null") {
+		t.Errorf("query should carry a bare null input, got %q", last)
+	}
+	if strings.Contains(last, `"json"`) {
+		t.Errorf("input must not be superjson-wrapped (server has no transformer): %q", last)
 	}
 }
 
