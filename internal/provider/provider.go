@@ -222,9 +222,18 @@ func firstNonEmpty(v types.String, env, fallback string) string {
 	return fallback
 }
 
-// stringOrNull converts an optional string pointer to a Terraform value.
+// stringOrNull converts an optional string pointer to a Terraform value,
+// treating an empty string as null.
+//
+// The API accepts both null and "" for an optional field and stores whichever it
+// is given, so a record created elsewhere — the web UI submits empty strings for
+// untouched form fields — comes back as "". Passing that through would make a
+// read report "" where the plan said null, and Terraform rejects the result with
+// "provider produced an unexpected new value ... was null, but now
+// cty.StringVal(\"\")". The two are the same thing semantically, so they are
+// normalised to the one Terraform can round-trip.
 func stringOrNull(s *string) types.String {
-	if s == nil {
+	if s == nil || *s == "" {
 		return types.StringNull()
 	}
 	return types.StringValue(*s)

@@ -412,8 +412,13 @@ func applyMcpServer(ctx context.Context, m *mcpServerResourceModel, s *client.Mc
 	if len(s.Headers) > 0 || !m.Headers.IsNull() {
 		m.Headers = stringMapValue(ctx, s.Headers, &diags)
 	}
+	// A sensitive string needs the same empty-to-null normalisation as the others.
+	// The server reports "" for a token it does not hold (a record created through
+	// the web UI stores an empty string, not null), and Terraform rejects a
+	// sensitive attribute whose new value differs from the plan with its own
+	// wording: "inconsistent values for sensitive attribute".
 	if s.BearerToken != nil {
-		m.BearerToken = types.StringValue(*s.BearerToken)
+		m.BearerToken = stringOrNull(s.BearerToken)
 	}
 
 	return diags
