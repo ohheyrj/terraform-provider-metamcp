@@ -191,8 +191,12 @@ func userIDForVisibility(isPublic types.Bool, ownUserID string, onCreate bool) (
 	}
 
 	if isPublic.ValueBool() {
-		empty := ""
-		return &empty, nil // public: clear the owner
+		// Public is the ABSENCE of an owner, so this must serialise as an
+		// explicit null. A pointer to "" would be sent verbatim and Postgres
+		// rejects it: user_id is a foreign key to users.id, so "" is not NULL
+		// and matches no row.
+		sentinel := client.SendNullUserID
+		return &sentinel, nil
 	}
 
 	// Private: the owner must be a real user id. The API passes user_id straight

@@ -34,6 +34,9 @@ type testServer struct {
 	errors map[string]map[string]any
 
 	sawCookie string
+	// onRequest, when set, receives each request's decoded input so a test can
+	// assert on the exact bytes the client put on the wire.
+	onRequest func(proc, input string)
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -118,6 +121,9 @@ func newTestServer(t *testing.T) *testServer {
 		}
 
 		ts.calls = append(ts.calls, fmt.Sprintf("%s %s %s", r.Method, proc, input))
+		if ts.onRequest != nil {
+			ts.onRequest(proc, input)
+		}
 
 		if e, ok := ts.errors[proc]; ok {
 			_ = json.NewEncoder(w).Encode([]any{map[string]any{"error": e}})
@@ -287,10 +293,54 @@ func TestTolerantEnvelopeDecoding(t *testing.T) {
 		t.Errorf("expected nil Description, got %v", *ns.Description)
 	}
 
-	// success:false with no data must be reported as not-found, not as success.
+	// success:false must surface the SERVER's message, not a constant sentinel.
+	// Reporting "not found" for every failure is how a constraint violation came
+	// to read as a missing object and sent the debugging in the wrong direction.
 	ts.responders["namespaces.get"] = map[string]any{"success": false, "message": "gone"}
+	_, err = c.GetNamespace(context.Background(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if err == nil {
+		t.Fatal("expected an error for success:false")
+	}
+	if !strings.Contains(err.Error(), "gone") {
+		t.Errorf("server message was discarded; got %v", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("a refusal must not be reported as not-found; got %v", err)
+	}
+
+	// success:true with no payload IS an absence, and must still be ErrNotFound.
+	ts.responders["namespaces.get"] = map[string]any{"success": true}
 	if _, err := c.GetNamespace(context.Background(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("expected ErrNotFound for success:false, got %v", err)
+		t.Errorf("expected ErrNotFound for success with no data, got %v", err)
+	}
+}
+
+// TestUpdateBodyKeepsUUID pins a marshalling trap: a type with its own
+// MarshalJSON promotes that method into anything that embeds it, so
+// `struct{McpServerInput; UUID string}` marshalled via McpServerInput and
+// dropped the uuid. The server then looked up a uuid the request never carried
+// and answered "not found".
+func TestUpdateBodyKeepsUUID(t *testing.T) {
+	ts := newTestServer(t)
+	var gotBody string
+	ts.responders["mcpServers.update"] = map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"uuid": "55555555-5555-5555-5555-555555555555", "name": "srv",
+			"type": "STREAMABLE_HTTP", "url": "https://example.com/mcp",
+			"error_status": "NONE", "user_id": nil, "args": []string{}, "env": map[string]string{},
+			"headers": map[string]string{},
+		},
+	}
+	ts.onRequest = func(_ string, body string) { gotBody = body }
+	c := ts.client(t)
+	if _, err := c.UpdateMcpServer(context.Background(),
+		"55555555-5555-5555-5555-555555555555",
+		McpServerInput{Name: "srv", Type: ServerTypeStreamableHTTP}); err != nil {
+		t.Fatalf("UpdateMcpServer: %v", err)
+	}
+	if !strings.Contains(gotBody, "55555555-5555-5555-5555-555555555555") {
+		t.Fatalf("update body lost the uuid: %s", gotBody)
 	}
 }
 

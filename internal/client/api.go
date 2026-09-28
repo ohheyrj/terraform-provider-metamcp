@@ -1,6 +1,10 @@
 package client
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+)
 
 // This file mirrors the server's zod schemas field-for-field. Names and
 // optionality come from the MetaMCP source (packages/zod-types), not from
@@ -60,14 +64,43 @@ type NamespaceInput struct {
 	UserID         *string  `json:"user_id,omitempty"`
 }
 
+// apiError reports a logical failure the API returned inside a 200 response.
+type apiError struct {
+	op      string
+	message string
+}
+
+func (e *apiError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("metamcp: %s failed (the API returned no message)", e.op)
+	}
+	return fmt.Sprintf("metamcp: %s: %s", e.op, e.message)
+}
+
+// apiFailure interprets an envelope that carried no payload.
+//
+// MetaMCP signals most refusals as {success:false, message:"..."} with HTTP 200,
+// so that message is the ONLY explanation of the failure. success:true with no
+// data is a genuine absence. Treating both as ErrNotFound — as an earlier
+// version did — replaced every server-supplied explanation with "not found" and
+// sent the reader hunting for an object that was present all along.
+func apiFailure(op string, success bool, message string) error {
+	if !success {
+		return &apiError{op: op, message: message}
+	}
+	return fmt.Errorf("%w (%s: success but no data)", ErrNotFound, op)
+}
+
 // namespaceEnvelope is the {success, data, message} wrapper these procedures return.
 type namespaceEnvelope struct {
 	Success bool       `json:"success"`
+	Message string     `json:"message"`
 	Data    *Namespace `json:"data"`
 }
 
 type namespaceListEnvelope struct {
 	Success bool        `json:"success"`
+	Message string      `json:"message"`
 	Data    []Namespace `json:"data"`
 }
 
@@ -90,7 +123,7 @@ func (c *Client) GetNamespace(ctx context.Context, uuid string) (*Namespace, err
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("namespaces.get", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -104,7 +137,7 @@ func (c *Client) CreateNamespace(ctx context.Context, in NamespaceInput) (*Names
 	if out.Data == nil {
 		// The API reports failures as success:false rather than an error, so an
 		// absent payload must not be reported as a successful create.
-		return nil, ErrNotFound
+		return nil, apiFailure("namespaces.create", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -121,7 +154,7 @@ func (c *Client) UpdateNamespace(ctx context.Context, uuid string, in NamespaceI
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("namespaces.update", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -166,6 +199,20 @@ type McpServer struct {
 	ErrorStatus string            `json:"error_status,omitempty"`
 }
 
+// SendNullUserID is a sentinel for McpServerInput.UserID meaning "send an
+// explicit JSON null".
+//
+// It exists because a nil *string with `omitempty` omits the key entirely, and
+// this API treats "absent" and "null" as different instructions: absent means
+// *leave ownership alone*, null means *make it public*. Those cannot share a
+// representation.
+//
+// A pointer to the empty string — what an earlier version sent for public — is
+// the third meaning (a user id) and must never be used here: user_id is a
+// foreign key to users.id, so "" is not NULL and matches no row, and Postgres
+// rejects it as a constraint violation.
+const SendNullUserID = "\x00null"
+
 // McpServerInput is CreateMcpServerRequestSchema / UpdateMcpServerRequestSchema.
 //
 // Server-side validation is worth mirroring in the provider: the name must
@@ -184,13 +231,62 @@ type McpServerInput struct {
 	UserID      *string           `json:"user_id,omitempty"`
 }
 
+// bodyWithUUID builds a request body from the input plus a uuid.
+//
+// It does NOT use struct embedding. A type with its own MarshalJSON promotes
+// that method to any struct that embeds it, so `struct{McpServerInput; UUID}` in
+// this package marshals via McpServerInput.MarshalJSON and silently DROPS the
+// uuid — the request then reads as "object not found", because the server looks
+// up a uuid the request never carried.
+func (in McpServerInput) bodyWithUUID(uuid string) (map[string]any, error) {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if uuid != "" {
+		body["uuid"] = uuid
+	}
+	return body, nil
+}
+
+// MarshalJSON renders the user_id sentinel as an explicit null. Struct tags
+// alone cannot express all three states, so public is spliced in textually —
+// rebuilding as a map would drop the field order and every other field's
+// omitempty behaviour.
+func (in McpServerInput) MarshalJSON() ([]byte, error) {
+	type alias McpServerInput
+	if in.UserID == nil || *in.UserID != SendNullUserID {
+		return json.Marshal(alias(in))
+	}
+	cp := in
+	cp.UserID = nil
+	base, err := json.Marshal(alias(cp))
+	if err != nil {
+		return nil, err
+	}
+	if string(base) == "{}" {
+		return []byte(`{"user_id":null}`), nil
+	}
+	body := string(base)[:len(base)-1] // drop the trailing }
+	if len(body) > 1 {
+		body += ","
+	}
+	return []byte(body + `"user_id":null}`), nil
+}
+
 type serverEnvelope struct {
 	Success bool       `json:"success"`
+	Message string     `json:"message"`
 	Data    *McpServer `json:"data"`
 }
 
 type serverListEnvelope struct {
 	Success bool        `json:"success"`
+	Message string      `json:"message"`
 	Data    []McpServer `json:"data"`
 }
 
@@ -213,7 +309,7 @@ func (c *Client) GetMcpServer(ctx context.Context, uuid string) (*McpServer, err
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("mcpServers.get", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -225,24 +321,24 @@ func (c *Client) CreateMcpServer(ctx context.Context, in McpServerInput) (*McpSe
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("mcpServers.create", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
 
 // UpdateMcpServer updates an MCP server in place.
 func (c *Client) UpdateMcpServer(ctx context.Context, uuid string, in McpServerInput) (*McpServer, error) {
-	body := struct {
-		McpServerInput
-		UUID string `json:"uuid"`
-	}{McpServerInput: in, UUID: uuid}
+	body, err := in.bodyWithUUID(uuid)
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for mcpServers.update: %w", err)
+	}
 
 	var out serverEnvelope
 	if err := c.callRaw(ctx, "mcpServers.update", body, &out); err != nil {
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("mcpServers.update", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -314,11 +410,13 @@ type EndpointUpdateInput struct {
 
 type endpointEnvelope struct {
 	Success bool      `json:"success"`
+	Message string    `json:"message"`
 	Data    *Endpoint `json:"data"`
 }
 
 type endpointListEnvelope struct {
 	Success bool       `json:"success"`
+	Message string     `json:"message"`
 	Data    []Endpoint `json:"data"`
 }
 
@@ -341,7 +439,7 @@ func (c *Client) GetEndpoint(ctx context.Context, uuid string) (*Endpoint, error
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("endpoints.get", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -353,7 +451,7 @@ func (c *Client) CreateEndpoint(ctx context.Context, in EndpointInput) (*Endpoin
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("endpoints.create", out.Success, out.Message)
 	}
 	return out.Data, nil
 }
@@ -370,7 +468,7 @@ func (c *Client) UpdateEndpoint(ctx context.Context, uuid string, in EndpointUpd
 		return nil, err
 	}
 	if out.Data == nil {
-		return nil, ErrNotFound
+		return nil, apiFailure("endpoints.update", out.Success, out.Message)
 	}
 	return out.Data, nil
 }

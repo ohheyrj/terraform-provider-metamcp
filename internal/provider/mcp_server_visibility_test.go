@@ -2,11 +2,42 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+
+	"github.com/ohheyrj/terraform-provider-metamcp/internal/client"
 )
+
+// TestPublicNeverSendsAnEmptyUserID guards the exact bug that broke a live
+// apply: "" is not NULL, and the column is a foreign key, so the database
+// rejects it.
+func TestPublicNeverSendsAnEmptyUserID(t *testing.T) {
+	got, err := userIDForVisibility(types.BoolValue(true), "user-1", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("public sent nothing; it must send an explicit null")
+	}
+	if *got == "" {
+		t.Fatal(`public sent "", which is a foreign-key violation, not public`)
+	}
+	if *got != client.SendNullUserID {
+		t.Fatalf("expected the null sentinel, got %q", *got)
+	}
+	// and it must actually serialise to a JSON null, not the sentinel text
+	b, err := json.Marshal(client.McpServerInput{Name: "n", Type: client.ServerTypeStreamableHTTP, UserID: got})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"user_id":null`) {
+		t.Fatalf("public did not serialise to a JSON null: %s", b)
+	}
+}
 
 // TestUserIDForVisibility pins the three outcomes, which are easy to conflate
 // because two of them send a pointer and the failure is silent either way.
@@ -22,11 +53,11 @@ func TestUserIDForVisibility(t *testing.T) {
 		wantNil  bool // true means "send nothing", as distinct from "send empty"
 		wantErr  bool
 	}{
-		// Public sends the empty string, which CLEARS the owner. It is not the
-		// same as sending nothing, and conflating the two is the silent bug this
-		// table exists to catch.
-		{name: "public clears the owner", isPublic: types.BoolValue(true),
-			ownID: me, want: ""},
+		// Public must be an EXPLICIT NULL, not an empty string. user_id is a
+		// foreign key to users.id, so "" matches no row and Postgres rejects it;
+		// sending "" here is precisely the bug that reached a real server.
+		{name: "public sends an explicit null", isPublic: types.BoolValue(true),
+			ownID: me, want: client.SendNullUserID},
 		{name: "private claims the user", isPublic: types.BoolValue(false),
 			ownID: me, want: me},
 		{name: "unset on update sends nothing", isPublic: types.BoolNull(),

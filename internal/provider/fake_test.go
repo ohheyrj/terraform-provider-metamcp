@@ -425,15 +425,21 @@ func sliceOrEmpty(v any) any {
 	return v
 }
 
-// ownerFor mirrors how the API records visibility: null user_id means public.
-// An explicit empty string clears the owner, and an absent key means "leave it".
+// ownerFor mirrors how the API records visibility: null user_id means public, a
+// user id means that owner, and an absent key means "leave it".
+//
+// An empty string is deliberately NOT accepted as public. user_id is a foreign
+// key to users.id, so the real database rejects "" as a constraint violation —
+// accepting it here (as an earlier version did) let a provider that sent "" for
+// public pass every test while failing against the real server.
 func ownerFor(v any) any {
 	if v == nil {
 		return nil
 	}
 	if s, ok := v.(string); ok {
 		if s == "" {
-			return nil // public
+			panic("fake: user_id was sent as an empty string, which is a foreign-key " +
+				"violation in the real schema; public must be an explicit null")
 		}
 		return s
 	}
