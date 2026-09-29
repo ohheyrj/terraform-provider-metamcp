@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -51,8 +53,17 @@ type mcpServerResourceModel struct {
 	Env         types.Map    `tfsdk:"env"`
 	URL         types.String `tfsdk:"url"`
 	BearerToken types.String `tfsdk:"bearer_token"`
-	Headers     types.Map    `tfsdk:"headers"`
-	CreatedAt   types.String `tfsdk:"created_at"`
+
+	// TokenFingerprint is a SHA-256 of the configured bearer_token, kept so a
+	// ROTATED token is detectable.
+	//
+	// A write-only attribute is absent from state, so Terraform cannot diff it:
+	// changing the token in Vault produced "No changes" and the new credential
+	// was never pushed. This is a non-secret digest of the value, which is
+	// enough to notice that it changed without storing the value itself.
+	TokenFingerprint types.String `tfsdk:"token_fingerprint"`
+	Headers          types.Map    `tfsdk:"headers"`
+	CreatedAt        types.String `tfsdk:"created_at"`
 
 	// IsPublic maps to the API's user_id field: MetaMCP has no explicit
 	// visibility flag, it treats a null user_id as "not owned by anyone", which
@@ -144,6 +155,16 @@ func (r *mcpServerResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				MarkdownDescription: "Bearer token sent when connecting to a remote server. " +
 					"Write-only: it is stored on the server and never kept in Terraform " +
 					"state, so it cannot be read back. Requires Terraform 1.11 or later.",
+			},
+			"token_fingerprint": schema.StringAttribute{
+				Computed: true,
+				MarkdownDescription: "SHA-256 of the configured `bearer_token`, used to detect " +
+					"that the token has changed. `bearer_token` is write-only and therefore " +
+					"absent from state, so without this a rotated token is invisible to " +
+					"Terraform and is never pushed to the server. The digest is not a secret.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"headers": schema.MapAttribute{
 				Optional:            true,
@@ -459,4 +480,44 @@ func applyMcpServer(ctx context.Context, m *mcpServerResourceModel, s *client.Mc
 	// correct while the attribute was persisted — is now an error.
 
 	return diags
+}
+
+// tokenFingerprint is a SHA-256 of the configured token, used only to notice
+// that the value changed. It is not reversible in any practical sense, and it is
+// what makes a rotation visible to Terraform when the value itself cannot be
+// stored.
+func tokenFingerprint(v types.String) types.String {
+	if v.IsNull() || v.IsUnknown() {
+		return types.StringNull()
+	}
+	sum := sha256.Sum256([]byte(v.ValueString()))
+	return types.StringValue(hex.EncodeToString(sum[:]))
+}
+
+// ModifyPlan makes a rotated bearer_token visible to Terraform.
+//
+// bearer_token is write-only, so Terraform never stores it and cannot diff it:
+// editing the secret in Vault produced "No changes" and the new credential was
+// never sent to the server. The fingerprint is stored instead, and a mismatch
+// forces an update plan. Without this the attribute is unusable for rotation —
+// the one operation a credential exists to support.
+func (r *mcpServerResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return // destroy plan: nothing to update
+	}
+	var plan, cfg mcpServerResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	want := tokenFingerprint(cfg.BearerToken)
+
+	// Carry the configured token's fingerprint into the plan. When it differs
+	// from the value in state Terraform sees a change and schedules an update;
+	// when it matches, the plan stays empty. That comparison is the entire
+	// mechanism, so there is nothing to branch on here.
+	plan.TokenFingerprint = want
+	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 }

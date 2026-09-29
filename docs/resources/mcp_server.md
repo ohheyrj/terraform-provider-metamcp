@@ -66,6 +66,7 @@ The API does not report ownership for servers you do not own, so this is `Option
 ### Read-Only
 
 - `created_at` (String)
+- `token_fingerprint` (String) SHA-256 of the configured `bearer_token`, used to detect that the token has changed. `bearer_token` is write-only and therefore absent from state, so without this a rotated token is invisible to Terraform and is never pushed to the server. The digest is not a secret.
 - `uuid` (String)
 
 ## Import

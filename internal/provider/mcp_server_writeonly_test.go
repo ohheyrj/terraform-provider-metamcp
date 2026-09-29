@@ -75,3 +75,62 @@ resource "metamcp_mcp_server" "tokened" {
 }
 `
 }
+
+// A write-only attribute is absent from state, so Terraform cannot diff it:
+// editing the secret produced "No changes" and the rotated credential was never
+// pushed to the server. token_fingerprint exists to make rotation detectable,
+// and this test pins all three cases — unchanged stays empty, changed plans an
+// update, and the new value actually reaches the API.
+func TestBearerTokenRotationIsDetected(t *testing.T) {
+	f := newFakeMetaMCP(t)
+	var tokens []string
+	f.onServerWrite = func(_ string, in map[string]any) {
+		if v, ok := in["bearerToken"].(string); ok {
+			tokens = append(tokens, v)
+		}
+	}
+
+	const a = "token-AAAAAAAAAAAAAAAA"
+	const b = "token-BBBBBBBBBBBBBBBB"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: fakeProviderFactories(f.URL),
+		Steps: []resource.TestStep{
+			{
+				Config: testConfigBearerToken(f.URL, a),
+			},
+			{
+				// Unchanged: must NOT churn. The fingerprint is the only thing
+				// that could do so, since the token itself is never stored.
+				Config:   testConfigBearerToken(f.URL, a),
+				PlanOnly: true,
+			},
+			{
+				// Rotated: the new value must be pushed. PlanOnly would pass
+				// here even while sending nothing, so this applies.
+				Config: testConfigBearerToken(f.URL, b),
+			},
+			{
+				Config:   testConfigBearerToken(f.URL, b),
+				PlanOnly: true,
+			},
+		},
+	})
+
+	if len(tokens) < 2 {
+		t.Fatalf("expected the token to be sent at least twice (create + rotate), got %d: %v",
+			len(tokens), tokens)
+	}
+	if tokens[0] != a {
+		t.Errorf("first write sent %q, want %q", tokens[0], a)
+	}
+	found := false
+	for _, v := range tokens[1:] {
+		if v == b {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the rotated token never reached the API; writes were %v", tokens)
+	}
+}
