@@ -26,6 +26,9 @@ type mcpServerDataSourceModel struct {
 	URL         types.String `tfsdk:"url"`
 	CreatedAt   types.String `tfsdk:"created_at"`
 	ErrorStatus types.String `tfsdk:"error_status"`
+
+	// IsPublic mirrors the resource: a null owner in the API means public.
+	IsPublic types.Bool `tfsdk:"is_public"`
 }
 
 type mcpServerDataSource struct {
@@ -68,6 +71,11 @@ func (d *mcpServerDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 			"url":          dsschema.StringAttribute{Computed: true},
 			"created_at":   dsschema.StringAttribute{Computed: true},
 			"error_status": dsschema.StringAttribute{Computed: true},
+			"is_public": dsschema.BoolAttribute{
+				Computed: true,
+				MarkdownDescription: "Whether the server is public. MetaMCP encodes this " +
+					"as the absence of an owner.",
+			},
 		},
 	}
 }
@@ -134,6 +142,7 @@ func (d *mcpServerDataSource) Read(ctx context.Context, req datasource.ReadReque
 	config.URL = stringOrNull(found.URL)
 	config.CreatedAt = types.StringValue(found.CreatedAt)
 	config.ErrorStatus = types.StringValue(found.ErrorStatus)
+	config.IsPublic = types.BoolValue(found.UserID == nil)
 	config.Args = stringListValue(ctx, found.Args, &resp.Diagnostics)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &config)...)

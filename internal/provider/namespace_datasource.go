@@ -26,6 +26,9 @@ type namespaceDataSourceModel struct {
 	UpdatedAt   types.String `tfsdk:"updated_at"`
 
 	McpServerUUIDs types.Set `tfsdk:"mcp_server_uuids"`
+
+	// IsPublic mirrors the resource: a null owner in the API means public.
+	IsPublic types.Bool `tfsdk:"is_public"`
 }
 
 type namespaceDataSource struct {
@@ -64,6 +67,11 @@ func (d *namespaceDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 			},
 			"updated_at": dsschema.StringAttribute{
 				Computed: true,
+			},
+			"is_public": dsschema.BoolAttribute{
+				Computed: true,
+				MarkdownDescription: "Whether the namespace is public. MetaMCP encodes this " +
+					"as the absence of an owner.",
 			},
 			"mcp_server_uuids": dsschema.SetAttribute{
 				Computed:            true,
@@ -159,6 +167,7 @@ func (d *namespaceDataSource) Read(ctx context.Context, req datasource.ReadReque
 		resp.Diagnostics.Append(d...)
 		config.McpServerUUIDs = v
 	}
+	config.IsPublic = types.BoolValue(found.UserID == nil)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &config)...)
 }

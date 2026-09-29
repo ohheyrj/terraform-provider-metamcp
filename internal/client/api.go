@@ -64,6 +64,33 @@ type NamespaceInput struct {
 	UserID         *string  `json:"user_id,omitempty"`
 }
 
+// bodyWithUUID renders the input as a JSON object with an explicit null user_id
+// when the public sentinel is set.
+//
+// This is a plain function rather than a MarshalJSON method on NamespaceInput
+// for a specific reason: UpdateNamespace builds its body by EMBEDDING
+// NamespaceInput. A MarshalJSON method here would be promoted to that outer
+// struct and silently DROP the uuid, and the API would then look up an object
+// the request never named. McpServerInput avoids the trap only because its
+// update path was rewritten to use this shape as well.
+func (in NamespaceInput) bodyWithUUID(uuid string) (map[string]any, error) {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if in.UserID != nil && *in.UserID == SendNullUserID {
+		body["user_id"] = nil
+	}
+	if uuid != "" {
+		body["uuid"] = uuid
+	}
+	return body, nil
+}
+
 // apiError reports a logical failure the API returned inside a 200 response.
 type apiError struct {
 	op      string
@@ -130,8 +157,17 @@ func (c *Client) GetNamespace(ctx context.Context, uuid string) (*Namespace, err
 
 // CreateNamespace creates a namespace and returns it.
 func (c *Client) CreateNamespace(ctx context.Context, in NamespaceInput) (*Namespace, error) {
+	// Must go through bodyWithUUID, not the struct directly: the public sentinel
+	// is a non-empty Go string, so serialising the struct would send it verbatim
+	// as a literal user id instead of an explicit null, and the namespace would
+	// be stored as private with a nonsense owner.
+	body, err := in.bodyWithUUID("")
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for namespaces.create: %w", err)
+	}
+
 	var out namespaceEnvelope
-	if err := c.callRaw(ctx, "namespaces.create", in, &out); err != nil {
+	if err := c.callRaw(ctx, "namespaces.create", body, &out); err != nil {
 		return nil, err
 	}
 	if out.Data == nil {
@@ -144,10 +180,10 @@ func (c *Client) CreateNamespace(ctx context.Context, in NamespaceInput) (*Names
 
 // UpdateNamespace updates a namespace in place.
 func (c *Client) UpdateNamespace(ctx context.Context, uuid string, in NamespaceInput) (*Namespace, error) {
-	body := struct {
-		NamespaceInput
-		UUID string `json:"uuid"`
-	}{NamespaceInput: in, UUID: uuid}
+	body, err := in.bodyWithUUID(uuid)
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for namespaces.update: %w", err)
+	}
 
 	var out namespaceEnvelope
 	if err := c.callRaw(ctx, "namespaces.update", body, &out); err != nil {

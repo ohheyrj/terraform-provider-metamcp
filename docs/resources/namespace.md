@@ -41,6 +41,13 @@ resource "metamcp_namespace" "tools" {
 ### Optional
 
 - `description` (String) Free-text description.
+- `is_public` (Boolean) Whether the namespace is public, i.e. usable by every user rather than only its owner.
+
+MetaMCP encodes this as the absence of an owner, so setting it true clears ownership and setting it false claims the namespace for the authenticated user.
+
+The API enforces a relationship rule between the two: a public namespace may only contain public servers. Attaching a private server to a public namespace is refused by the server, so such a change fails with the server's own message.
+
+This is `Optional`+`Computed` because ownership can only be read back, never derived from configuration alone. Left unset, no ownership is sent on create and the namespace is created private for the authenticated user, matching the API's own default.
 - `mcp_server_uuids` (Set of String) UUIDs of the MCP servers associated with this namespace.
 
 Reference `metamcp_mcp_server.<name>.uuid` here to attach a server. Servers are attached by UUID, so this resource does not need to depend on the server's other attributes.

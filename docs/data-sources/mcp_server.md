@@ -43,5 +43,6 @@ output "github_status" {
 - `created_at` (String)
 - `description` (String)
 - `error_status` (String)
+- `is_public` (Boolean) Whether the server is public. MetaMCP encodes this as the absence of an owner.
 - `type` (String)
 - `url` (String)

@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -56,6 +57,10 @@ type namespaceResourceModel struct {
 	// but returns plain namespaces from namespaces.list, so this attribute is
 	// only accurate when read back with GetNamespace.
 	McpServerUUIDs types.Set `tfsdk:"mcp_server_uuids"`
+
+	// IsPublic maps to the API's user_id field exactly as it does on an MCP
+	// server: a null owner means public.
+	IsPublic types.Bool `tfsdk:"is_public"`
 }
 
 func (r *namespaceResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -95,6 +100,26 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"updated_at": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "Last-modified timestamp, as reported by the API.",
+			},
+			"is_public": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				MarkdownDescription: "Whether the namespace is public, i.e. usable by every " +
+					"user rather than only its owner.\n\n" +
+					"MetaMCP encodes this as the absence of an owner, so setting it " +
+					"true clears ownership and setting it false claims the namespace " +
+					"for the authenticated user.\n\n" +
+					"The API enforces a relationship rule between the two: a public " +
+					"namespace may only contain public servers. Attaching a private " +
+					"server to a public namespace is refused by the server, so such a " +
+					"change fails with the server's own message.\n\n" +
+					"This is `Optional`+`Computed` because ownership can only be read " +
+					"back, never derived from configuration alone. Left unset, no " +
+					"ownership is sent on create and the namespace is created private " +
+					"for the authenticated user, matching the API's own default.",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"mcp_server_uuids": schema.SetAttribute{
 				Optional:    true,
@@ -137,10 +162,17 @@ func (r *namespaceResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
+	owner, err := userIDForVisibility(plan.IsPublic, r.client.UserID(), true)
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(path.Root("is_public"), "Invalid visibility", err.Error())
+		return
+	}
+
 	created, err := r.client.CreateNamespace(ctx, client.NamespaceInput{
 		Name:           plan.Name.ValueString(),
 		Description:    managedStringPtr(plan.Description),
 		McpServerUUIDs: stringSet(ctx, plan.McpServerUUIDs, &resp.Diagnostics),
+		UserID:         owner,
 	})
 	if resp.Diagnostics.HasError() {
 		return
@@ -191,11 +223,28 @@ func (r *namespaceResource) Update(ctx context.Context, req resource.UpdateReque
 		return
 	}
 
-	updated, err := r.client.UpdateNamespace(ctx, state.UUID.ValueString(), client.NamespaceInput{
+	in := client.NamespaceInput{
 		Name:           plan.Name.ValueString(),
 		Description:    managedStringPtr(plan.Description),
 		McpServerUUIDs: stringSet(ctx, plan.McpServerUUIDs, &resp.Diagnostics),
-	})
+	}
+	// Ownership is sent only when it actually changes. A null user_id means
+	// *public* to this API, not "leave alone", so sending it on every update
+	// would quietly make every managed namespace public.
+	//
+	// An unknown plan or state means ownership was never established (the API
+	// does not report it for namespaces you do not own), so there is nothing
+	// meaningful to compare and nothing to change.
+	if !plan.IsPublic.IsUnknown() && !state.IsPublic.IsUnknown() && !plan.IsPublic.Equal(state.IsPublic) {
+		owner, uerr := userIDForVisibility(plan.IsPublic, r.client.UserID(), false)
+		if uerr != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("is_public"), "Invalid visibility", uerr.Error())
+			return
+		}
+		in.UserID = owner
+	}
+
+	updated, err := r.client.UpdateNamespace(ctx, state.UUID.ValueString(), in)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -253,6 +302,12 @@ func applyNamespace(ctx context.Context, m *namespaceResourceModel, n *client.Na
 	m.Description = stringOrNull(n.Description)
 	m.CreatedAt = types.StringValue(n.CreatedAt)
 	m.UpdatedAt = types.StringValue(n.UpdatedAt)
+
+	// Same encoding as a server: a null owner means public. The API omits
+	// user_id entirely for namespaces it does not report ownership for, and a
+	// missing field is indistinguishable from null after decoding, so this
+	// always yields a concrete value rather than leaving the previous one.
+	m.IsPublic = types.BoolValue(n.UserID == nil)
 
 	if n.Servers != nil {
 		uuids := make([]string, 0, len(n.Servers))

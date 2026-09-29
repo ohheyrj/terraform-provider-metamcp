@@ -41,5 +41,6 @@ output "tools_servers" {
 
 - `created_at` (String)
 - `description` (String) Free-text description.
+- `is_public` (Boolean) Whether the namespace is public. MetaMCP encodes this as the absence of an owner.
 - `mcp_server_uuids` (Set of String) UUIDs of the MCP servers associated with this namespace.
 - `updated_at` (String)

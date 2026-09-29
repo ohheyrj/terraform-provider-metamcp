@@ -227,8 +227,11 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 			"description": in["description"],
 			"created_at":  "2026-01-01T00:00:00Z",
 			"updated_at":  "2026-01-01T00:00:00Z",
-			"user_id":     nil,
+			"user_id":     nsOwner(in),
 			"_servers":    uuids("mcpServerUuids"),
+		}
+		if msg := f.checkNamespaceServerVisibility(ns["user_id"], uuids("mcpServerUuids")); msg != "" {
+			return map[string]any{"success": false, "message": msg}, nil
 		}
 		f.namespaces[id] = ns
 		return map[string]any{"success": true, "data": f.publicNamespace(ns)}, nil
@@ -240,9 +243,19 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 			return map[string]any{"success": false, "message": "Namespace not found"}, nil
 		}
 		ns["name"] = str("name")
-		ns["description"] = in["description"]
+		if v, ok := in["description"]; ok {
+			ns["description"] = v
+		}
+		// The API spreads the input over the update, so an absent key keeps the
+		// existing owner while an explicit null makes the namespace public.
+		if v, ok := in["user_id"]; ok {
+			ns["user_id"] = ownerFor(v)
+		}
 		// update replaces the association wholesale.
 		ns["_servers"] = uuids("mcpServerUuids")
+		if msg := f.checkNamespaceServerVisibility(ns["user_id"], uuids("mcpServerUuids")); msg != "" {
+			return map[string]any{"success": false, "message": msg}, nil
+		}
 		ns["updated_at"] = "2026-01-02T00:00:00Z"
 		return map[string]any{"success": true, "data": f.publicNamespace(ns)}, nil
 
@@ -517,4 +530,38 @@ func (f *fakeMetaMCP) seedServer(fields map[string]any) string {
 // the server rather than only what Terraform recorded in state.
 func (f *fakeMetaMCP) serverField(id, field string) any {
 	return f.servers[id][field]
+}
+
+// nsOwner mirrors the API's create rule: `input.user_id !== undefined ?
+// input.user_id : userId`. An absent key defaults to the authenticated user, an
+// explicit null makes the namespace public.
+func nsOwner(in map[string]any) any {
+	if v, ok := in["user_id"]; ok {
+		return ownerFor(v)
+	}
+	return fakeUserID
+}
+
+// checkNamespaceServerVisibility enforces the API's relationship rule: a public
+// namespace may only contain public servers. The real server refuses with
+// "Access denied: Public namespaces can only contain public MCP servers. Server
+// \"<name>\" is private", so the fake must refuse too — otherwise a provider that
+// attached a private server to a public namespace would look successful here and
+// fail only against the live instance.
+func (f *fakeMetaMCP) checkNamespaceServerVisibility(owner any, serverUUIDs []string) string {
+	if owner != nil {
+		return "" // private namespace: no restriction
+	}
+	for _, uuid := range serverUUIDs {
+		srv, ok := f.servers[uuid]
+		if !ok {
+			continue
+		}
+		if srv["user_id"] != nil {
+			name, _ := srv["name"].(string)
+			return "Access denied: Public namespaces can only contain public MCP " +
+				"servers. Server \"" + name + "\" is private"
+		}
+	}
+	return ""
 }
