@@ -123,9 +123,27 @@ func (r *mcpServerResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				MarkdownDescription: "Remote MCP endpoint. Required when `type` is `SSE` or `STREAMABLE_HTTP`.",
 			},
 			"bearer_token": schema.StringAttribute{
-				Optional:            true,
-				Sensitive:           true,
-				MarkdownDescription: "Bearer token sent when connecting to a remote server.",
+				Optional: true,
+				// Sensitive still earns its place even though WriteOnly keeps the
+				// value out of state: it is what stops the value appearing in plan
+				// output and logs.
+				Sensitive: true,
+				// WriteOnly: the value is sent to the API but never written to
+				// the plan or state. Without this, an ephemeral source cannot
+				// drive it at all:
+				//
+				//   Error: Invalid use of ephemeral value
+				//   Ephemeral values are not valid for "bearer_token", because
+				//   it is not a write-only attribute and must be persisted to
+				//   state.
+				//
+				// That matters because the credential belongs in Vault, not in
+				// state: an ephemeral vault_kv_secret_v2 read is the only way to
+				// keep it out of both. Requires Terraform 1.11+.
+				WriteOnly: true,
+				MarkdownDescription: "Bearer token sent when connecting to a remote server. " +
+					"Write-only: it is stored on the server and never kept in Terraform " +
+					"state, so it cannot be read back. Requires Terraform 1.11 or later.",
 			},
 			"headers": schema.MapAttribute{
 				Optional:            true,
@@ -251,6 +269,16 @@ func (r *mcpServerResource) Create(ctx context.Context, req resource.CreateReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// bearer_token is write-only, so the framework nullifies it in the planned
+	// state (NullifyWriteOnlyAttributes runs over PlannedState): the value the
+	// user configured survives ONLY in Config. Reading it from the plan silently
+	// yields null and the token is never sent — the apply succeeds and the
+	// credential is simply missing on the server.
+	var cfg mcpServerResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	if msg := validateTransport(&plan); msg != "" {
 		resp.Diagnostics.AddAttributeError(path.Root("type"), "Invalid MCP server configuration", msg)
 		return
@@ -264,7 +292,7 @@ func (r *mcpServerResource) Create(ctx context.Context, req resource.CreateReque
 		Args:        stringList(ctx, plan.Args, &resp.Diagnostics),
 		Env:         stringMap(ctx, plan.Env, &resp.Diagnostics),
 		URL:         stringPtr(plan.URL),
-		BearerToken: stringPtr(plan.BearerToken),
+		BearerToken: stringPtr(cfg.BearerToken),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
 	owner, err := userIDForVisibility(plan.IsPublic, r.client.UserID(), true)
@@ -317,6 +345,13 @@ func (r *mcpServerResource) Update(ctx context.Context, req resource.UpdateReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// As in Create: a write-only attribute is nullified in both the plan and the
+	// state, so Config is the only place its configured value survives.
+	var cfg mcpServerResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	if msg := validateTransport(&plan); msg != "" {
 		resp.Diagnostics.AddAttributeError(path.Root("type"), "Invalid MCP server configuration", msg)
 		return
@@ -330,7 +365,11 @@ func (r *mcpServerResource) Update(ctx context.Context, req resource.UpdateReque
 		Args:        stringList(ctx, plan.Args, &resp.Diagnostics),
 		Env:         stringMap(ctx, plan.Env, &resp.Diagnostics),
 		URL:         stringPtr(plan.URL),
-		BearerToken: stringPtr(plan.BearerToken),
+		// Omitted when the config supplies nothing: the API treats an absent
+		// field as "keep", so an unrelated update must not clear an existing
+		// token. There is no way to detect a deliberate "remove my token" here,
+		// because the previous value is not in state to compare against.
+		BearerToken: stringPtr(cfg.BearerToken),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
 	// Ownership is sent only when the value is actually changing. A null user_id
@@ -412,14 +451,12 @@ func applyMcpServer(ctx context.Context, m *mcpServerResourceModel, s *client.Mc
 	if len(s.Headers) > 0 || !m.Headers.IsNull() {
 		m.Headers = stringMapValue(ctx, s.Headers, &diags)
 	}
-	// A sensitive string needs the same empty-to-null normalisation as the others.
-	// The server reports "" for a token it does not hold (a record created through
-	// the web UI stores an empty string, not null), and Terraform rejects a
-	// sensitive attribute whose new value differs from the plan with its own
-	// wording: "inconsistent values for sensitive attribute".
-	if s.BearerToken != nil {
-		m.BearerToken = stringOrNull(s.BearerToken)
-	}
+	// bearer_token is deliberately NOT read back. It is a write-only attribute,
+	// so Terraform does not keep it in the plan or state and the framework raises
+	// a data-consistency error if the provider tries to return a value for it:
+	// the read must leave it exactly as the plan configured it. Assigning the
+	// server's copy here — even as an empty-to-null normalisation, which was
+	// correct while the attribute was persisted — is now an error.
 
 	return diags
 }

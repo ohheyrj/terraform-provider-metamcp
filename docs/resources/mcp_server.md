@@ -51,7 +51,7 @@ resource "metamcp_mcp_server" "filesystem" {
 ### Optional
 
 - `args` (List of String) Arguments for `command`.
-- `bearer_token` (String, Sensitive) Bearer token sent when connecting to a remote server.
+- `bearer_token` (String, Sensitive) Bearer token sent when connecting to a remote server. Write-only: it is stored on the server and never kept in Terraform state, so it cannot be read back. Requires Terraform 1.11 or later.
 - `command` (String) Executable to run. Required when `type` is `STDIO`.
 - `description` (String)
 - `env` (Map of String, Sensitive) Environment for a `STDIO` server. Marked sensitive because these routinely carry API keys.

@@ -39,6 +39,11 @@ type fakeMetaMCP struct {
 	endpoints  map[string]map[string]any
 	apiKeys    map[string]map[string]any
 	seq        int
+
+	// onServerWrite, when set, receives the input of every create/update so a
+	// test can assert on what actually reached the API — necessary for
+	// write-only attributes, whose value is absent from the plan and state.
+	onServerWrite func(proc string, in map[string]any)
 }
 
 // TestMain opts the whole provider package into the acceptance-test harness.
@@ -162,6 +167,9 @@ func (f *fakeMetaMCP) nextUUID() string {
 }
 
 func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
+	if f.onServerWrite != nil && (proc == "mcpServers.create" || proc == "mcpServers.update") {
+		f.onServerWrite(proc, in)
+	}
 	str := func(k string) string {
 		if v, ok := in[k].(string); ok {
 			return v
