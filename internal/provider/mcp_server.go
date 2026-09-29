@@ -19,14 +19,17 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/ohheyrj/terraform-provider-metamcp/internal/client"
 )
 
 var (
-	_ resource.Resource                = &mcpServerResource{}
-	_ resource.ResourceWithConfigure   = &mcpServerResource{}
-	_ resource.ResourceWithImportState = &mcpServerResource{}
+	_ resource.Resource                 = &mcpServerResource{}
+	_ resource.ResourceWithConfigure    = &mcpServerResource{}
+	_ resource.ResourceWithImportState  = &mcpServerResource{}
+	_ resource.ResourceWithUpgradeState = &mcpServerResource{}
 
 	// serverNamePattern mirrors the API's own validation: letters, numbers,
 	// underscores and hyphens only, with no consecutive underscores.
@@ -80,6 +83,9 @@ func (r *mcpServerResource) Metadata(_ context.Context, req resource.MetadataReq
 
 func (r *mcpServerResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
+		// Version 1 drops the write-only bearer_token from state written by
+		// version 0; see UpgradeState.
+		Version: 1,
 		MarkdownDescription: "Manages an MCP server registered with MetaMCP.\n\n" +
 			"A server is either a local process (`STDIO`, needing `command` and " +
 			"`args`) or a remote service (`SSE` or `STREAMABLE_HTTP`, needing " +
@@ -545,4 +551,67 @@ func bearerTokenForUpdate(cfg types.String, stateFingerprint types.String) *stri
 		return &empty
 	}
 	return nil
+}
+
+// UpgradeState drops the bearer_token from state written before it became
+// write-only.
+//
+// Terraform will not accept a value for a write-only attribute back from a
+// provider, and state written by version 0 still contains the token. The
+// framework nullifies write-only values only on the UpgradeState path — the
+// version-match passthrough returns the raw state untouched — so without an
+// explicit upgrade, any resource already in state fails the moment the provider
+// is upgraded, before anything can even be planned:
+//
+//	Invalid resource state upgrade ... returned a value for the write-only
+//	attribute ... bearer_token
+//
+// Every other attribute is preserved exactly as stored. The token cannot be
+// carried forward, and does not need to be: it is unreadable by design, and the
+// fingerprint handles change detection from here on.
+func (r *mcpServerResource) UpgradeState(_ context.Context) map[int64]resource.StateUpgrader {
+	return map[int64]resource.StateUpgrader{
+		0: {
+			StateUpgrader: func(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
+				// resp.State.Schema is the *current* schema, so this parses the
+				// old state as today's shape. Ignoring undefined attributes
+				// keeps state readable after any attribute is removed from the
+				// schema (error_status, previously).
+				schemaType := resp.State.Schema.Type().TerraformType(ctx)
+				rawStateValue, err := req.RawState.UnmarshalWithOpts(schemaType, tfprotov6.UnmarshalOpts{
+					ValueFromJSONOpts: tftypes.ValueFromJSONOpts{
+						IgnoreUndefinedAttributes: true,
+					},
+				})
+				if err != nil {
+					resp.Diagnostics.AddError(
+						"Unable to read state written by version 0",
+						"The saved state could not be read using the current schema, so it cannot be "+
+							"upgraded. This is a bug in the provider; please report it. Original error:\n\n"+err.Error(),
+					)
+					return
+				}
+
+				modified, err := tftypes.Transform(rawStateValue, func(p *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+					steps := p.Steps()
+					if len(steps) == 1 {
+						if name, ok := steps[0].(tftypes.AttributeName); ok && string(name) == "bearer_token" {
+							return tftypes.NewValue(v.Type(), nil), nil
+						}
+					}
+					return v, nil
+				})
+				if err != nil {
+					resp.Diagnostics.AddError(
+						"Unable to rewrite state written by version 0",
+						"The saved state could not be rewritten to remove the write-only attribute. "+
+							"This is a bug in the provider; please report it. Original error:\n\n"+err.Error(),
+					)
+					return
+				}
+
+				resp.State.Raw = modified
+			},
+		},
+	}
 }
