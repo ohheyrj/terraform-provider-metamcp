@@ -386,11 +386,7 @@ func (r *mcpServerResource) Update(ctx context.Context, req resource.UpdateReque
 		Args:        stringList(ctx, plan.Args, &resp.Diagnostics),
 		Env:         stringMap(ctx, plan.Env, &resp.Diagnostics),
 		URL:         stringPtr(plan.URL),
-		// Omitted when the config supplies nothing: the API treats an absent
-		// field as "keep", so an unrelated update must not clear an existing
-		// token. There is no way to detect a deliberate "remove my token" here,
-		// because the previous value is not in state to compare against.
-		BearerToken: stringPtr(cfg.BearerToken),
+		BearerToken: bearerTokenForUpdate(cfg.BearerToken, state.TokenFingerprint),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
 	// Ownership is sent only when the value is actually changing. A null user_id
@@ -520,4 +516,33 @@ func (r *mcpServerResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	// mechanism, so there is nothing to branch on here.
 	plan.TokenFingerprint = want
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
+}
+
+// bearerTokenForUpdate decides what to send for the write-only token on update.
+//
+// The API's schema is `bearerToken: z.string().optional()` — NOT nullable — so an
+// explicit JSON null is rejected, while its consumer tests `if (authToken)` and
+// therefore treats "" as "no credential". So "" is how a token is cleared.
+//
+// Three cases, and the distinction matters because the API reads an absent field
+// as "keep":
+//
+//	config has a token                  -> send it
+//	config has none, state recorded one -> send "" (the user removed it)
+//	config has none, state recorded none-> omit (an unrelated update)
+//
+// The state fingerprint is what makes the middle case detectable: the token
+// itself is write-only and absent from state, so without it there is no way to
+// tell "never had one" from "had one, now removed", and removing a token would
+// silently leave the old credential working.
+func bearerTokenForUpdate(cfg types.String, stateFingerprint types.String) *string {
+	if !cfg.IsNull() && !cfg.IsUnknown() {
+		v := cfg.ValueString()
+		return &v
+	}
+	if !stateFingerprint.IsNull() && !stateFingerprint.IsUnknown() {
+		empty := ""
+		return &empty
+	}
+	return nil
 }

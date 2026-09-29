@@ -59,7 +59,16 @@ func TestBearerTokenIsWriteOnly(t *testing.T) {
 	}
 }
 
+// testConfigBearerToken renders the resource with the token attribute ABSENT
+// when token is empty. That distinction is the whole point: `bearer_token = ""`
+// is a present empty string, which takes a different branch in the update path,
+// whereas removing the line entirely is what a user actually does when they want
+// a token gone.
 func testConfigBearerToken(endpoint, token string) string {
+	tokenLine := ""
+	if token != "" {
+		tokenLine = `  bearer_token = "` + token + `"`
+	}
 	return `
 provider "metamcp" {
   endpoint = "` + endpoint + `"
@@ -68,10 +77,10 @@ provider "metamcp" {
 }
 
 resource "metamcp_mcp_server" "tokened" {
-  name         = "tokened"
-  type         = "STREAMABLE_HTTP"
-  url          = "https://example.com/mcp"
-  bearer_token = "` + token + `"
+  name = "tokened"
+  type = "STREAMABLE_HTTP"
+  url  = "https://example.com/mcp"
+` + tokenLine + `
 }
 `
 }
@@ -132,5 +141,56 @@ func TestBearerTokenRotationIsDetected(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the rotated token never reached the API; writes were %v", tokens)
+	}
+}
+
+// Removing a token from the configuration must clear it on the server.
+//
+// The API reads an absent field as "keep", so omitting the token would leave the
+// old credential working after the user had deliberately removed it. The state
+// fingerprint is what makes "never had one" distinguishable from "had one, now
+// removed"; without it, only the latter needs an explicit "" to clear.
+func TestBearerTokenRemovalClearsIt(t *testing.T) {
+	f := newFakeMetaMCP(t)
+	var sent []*string
+	f.onServerWrite = func(_ string, in map[string]any) {
+		if v, ok := in["bearerToken"]; ok {
+			s := v.(string)
+			sent = append(sent, &s)
+		} else {
+			sent = append(sent, nil)
+		}
+	}
+
+	const tok = "token-ROTATEME-12345678"
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: fakeProviderFactories(f.URL),
+		Steps: []resource.TestStep{
+			{
+				Config: testConfigBearerToken(f.URL, tok),
+			},
+			{
+				// The token is gone from config; this must push "" to clear it.
+				Config: testConfigBearerToken(f.URL, ""),
+			},
+			{
+				Config:   testConfigBearerToken(f.URL, ""),
+				PlanOnly: true,
+			},
+		},
+	})
+
+	if len(sent) < 2 {
+		t.Fatalf("expected create then clearing update, got %d writes: %v", len(sent), sent)
+	}
+	for i, v := range sent {
+		if v == nil {
+			t.Fatalf("write %d omitted the token; the API reads an absent field as "+
+				"'keep', so the old credential would still work: %v", i, sent)
+		}
+	}
+	if last := *sent[len(sent)-1]; last != "" {
+		t.Errorf("final write sent %q, want \"\" to clear the token", last)
 	}
 }
