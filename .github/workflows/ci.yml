@@ -47,10 +47,23 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Write-only attributes (bearer_token) need Terraform 1.11+. The test
+      # harness downloads its own Terraform, which may be older, and against an
+      # older CLI every write-only test fails with "WriteOnly Attribute Not
+      # Allowed" — which reads like a schema bug and is not. Pinning the binary
+      # makes that deterministic instead of dependent on what the runner fetches.
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
       # Unit tests only. They speak to a fake MetaMCP, so they need no
       # credentials and touch no network — no METAMCP_* secret is referenced
       # anywhere in this workflow.
       - name: Test
+        env:
+          TF_ACC_TERRAFORM_PATH: ${{ steps.setup-terraform.outputs.terraform_path }}
         run: go test ./... -race -coverprofile=coverage.txt
 
       - name: Build
