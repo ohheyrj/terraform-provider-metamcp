@@ -313,12 +313,12 @@ func (r *mcpServerResource) Create(ctx context.Context, req resource.CreateReque
 
 	in := client.McpServerInput{
 		Name:        plan.Name.ValueString(),
-		Description: stringPtr(plan.Description),
+		Description: managedStringPtr(plan.Description),
 		Type:        client.ServerType(plan.Type.ValueString()),
-		Command:     stringPtr(plan.Command),
+		Command:     managedStringPtr(plan.Command),
 		Args:        stringList(ctx, plan.Args, &resp.Diagnostics),
 		Env:         stringMap(ctx, plan.Env, &resp.Diagnostics),
-		URL:         stringPtr(plan.URL),
+		URL:         managedStringPtr(plan.URL),
 		BearerToken: stringPtr(cfg.BearerToken),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
@@ -386,12 +386,12 @@ func (r *mcpServerResource) Update(ctx context.Context, req resource.UpdateReque
 
 	in := client.McpServerInput{
 		Name:        plan.Name.ValueString(),
-		Description: stringPtr(plan.Description),
+		Description: managedStringPtr(plan.Description),
 		Type:        client.ServerType(plan.Type.ValueString()),
-		Command:     stringPtr(plan.Command),
+		Command:     managedStringPtr(plan.Command),
 		Args:        stringList(ctx, plan.Args, &resp.Diagnostics),
 		Env:         stringMap(ctx, plan.Env, &resp.Diagnostics),
-		URL:         stringPtr(plan.URL),
+		URL:         managedStringPtr(plan.URL),
 		BearerToken: bearerTokenForUpdate(cfg.BearerToken, state.TokenFingerprint),
 		Headers:     stringMap(ctx, plan.Headers, &resp.Diagnostics),
 	}
@@ -613,5 +613,33 @@ func (r *mcpServerResource) UpgradeState(_ context.Context) map[int64]resource.S
 				resp.State.Raw = modified
 			},
 		},
+	}
+}
+
+// managedStringPtr renders an optional string for a WRITE, where a null in the
+// configuration means "no value" and must actively clear the field.
+//
+// These columns are nullable, but the API's request schemas are
+// `z.string().optional()` — deliberately NOT nullable — so an explicit JSON null
+// is rejected, while an *absent* key means "keep whatever is already there". With
+// omitempty, a null therefore left the old value untouched and the read-back then
+// disagreed with the plan, failing the apply after the change had gone through:
+//
+//	Provider produced inconsistent result after apply
+//	.description: was null, but now cty.StringVal("ldn.casa Kubernetes MCP")
+//
+// An empty string is the API's own way of clearing a field — its web UI writes ""
+// for untouched inputs — and the read path already normalises "" back to null, so
+// this round-trips stably. Unknown is left omitted: it means the value is not yet
+// knowable, and keeping the server's current value is the conservative choice.
+func managedStringPtr(v types.String) *string {
+	switch {
+	case v.IsNull():
+		empty := ""
+		return &empty
+	case v.IsUnknown():
+		return nil
+	default:
+		return v.ValueStringPointer()
 	}
 }

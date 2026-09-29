@@ -146,7 +146,7 @@ func (r *endpointResource) Create(ctx context.Context, req resource.CreateReques
 
 	created, err := r.client.CreateEndpoint(ctx, client.EndpointInput{
 		Name:              plan.Name.ValueString(),
-		Description:       stringPtr(plan.Description),
+		Description:       managedStringPtr(plan.Description),
 		NamespaceUUID:     plan.NamespaceUUID.ValueString(),
 		EnableAPIKeyAuth:  plan.EnableAPIKeyAuth.ValueBoolPointer(),
 		EnableOauth:       plan.EnableOauth.ValueBoolPointer(),
@@ -197,7 +197,7 @@ func (r *endpointResource) Update(ctx context.Context, req resource.UpdateReques
 	// changing, so it is always sent.
 	updated, err := r.client.UpdateEndpoint(ctx, state.UUID.ValueString(), client.EndpointUpdateInput{
 		Name:              plan.Name.ValueString(),
-		Description:       stringPtr(plan.Description),
+		Description:       managedStringPtr(plan.Description),
 		NamespaceUUID:     plan.NamespaceUUID.ValueString(),
 		EnableAPIKeyAuth:  plan.EnableAPIKeyAuth.ValueBoolPointer(),
 		EnableOauth:       plan.EnableOauth.ValueBoolPointer(),

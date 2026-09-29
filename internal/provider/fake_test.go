@@ -292,8 +292,26 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 		}
 		srv["name"] = str("name")
 		srv["type"] = str("type")
-		srv["url"] = in["url"]
-		// Ownership follows the real rule: an ABSENT user_id keeps the existing
+		// Every optional field follows the real API rule: an ABSENT key means
+		// "keep the existing value", a present one replaces it. The API's request
+		// schemas are `z.string().optional()` and its repository spread is
+		// `{uuid, ...updateData}`, so that is literally what happens.
+		//
+		// This has to be modelled rather than assumed. The previous version
+		// hardcoded `srv["url"] = in["url"]`, which copies nil over the stored
+		// value, and never touched description at all — so a provider that
+		// omitted a field (via `omitempty` on a nil pointer) would have its own
+		// mistake echoed back as agreement, and the
+		// "was null, but now cty.StringVal(...)" failure could never reproduce
+		// here even though it happens against the real server.
+		for _, k := range []string{
+			"description", "url", "command", "bearerToken", "args", "env", "headers",
+		} {
+			if v, ok := in[k]; ok {
+				srv[k] = v
+			}
+		}
+		// Ownership follows the same rule: an ABSENT user_id keeps the existing
 		// owner, while an explicit null clears it. Distinguishing the two is the
 		// whole point of visibility, so a fake that ignored user_id here would
 		// hide a real bug — and one that treated absent as null would make every
@@ -466,4 +484,37 @@ func mapOrEmpty(v any) any {
 		return map[string]any{}
 	}
 	return v
+}
+
+// seedServer inserts a server as though it already existed on the real instance
+// — for example one created through the UI, whose optional fields the Terraform
+// configuration never declared. It returns the uuid for use with ImportState.
+func (f *fakeMetaMCP) seedServer(fields map[string]any) string {
+	id := f.nextUUID()
+	srv := map[string]any{
+		"uuid":         id,
+		"name":         "",
+		"description":  nil,
+		"type":         "STREAMABLE_HTTP",
+		"url":          nil,
+		"command":      nil,
+		"args":         []any{},
+		"env":          map[string]any{},
+		"headers":      map[string]any{},
+		"bearerToken":  nil,
+		"error_status": "NONE",
+		"user_id":      nil,
+		"created_at":   "2026-09-20T00:00:00Z",
+	}
+	for k, v := range fields {
+		srv[k] = v
+	}
+	f.servers[id] = srv
+	return id
+}
+
+// serverField reads a stored field, so a test can assert what actually reached
+// the server rather than only what Terraform recorded in state.
+func (f *fakeMetaMCP) serverField(id, field string) any {
+	return f.servers[id][field]
 }

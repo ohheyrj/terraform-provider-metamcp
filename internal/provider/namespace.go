@@ -139,7 +139,7 @@ func (r *namespaceResource) Create(ctx context.Context, req resource.CreateReque
 
 	created, err := r.client.CreateNamespace(ctx, client.NamespaceInput{
 		Name:           plan.Name.ValueString(),
-		Description:    stringPtr(plan.Description),
+		Description:    managedStringPtr(plan.Description),
 		McpServerUUIDs: stringSet(ctx, plan.McpServerUUIDs, &resp.Diagnostics),
 	})
 	if resp.Diagnostics.HasError() {
@@ -193,7 +193,7 @@ func (r *namespaceResource) Update(ctx context.Context, req resource.UpdateReque
 
 	updated, err := r.client.UpdateNamespace(ctx, state.UUID.ValueString(), client.NamespaceInput{
 		Name:           plan.Name.ValueString(),
-		Description:    stringPtr(plan.Description),
+		Description:    managedStringPtr(plan.Description),
 		McpServerUUIDs: stringSet(ctx, plan.McpServerUUIDs, &resp.Diagnostics),
 	})
 	if resp.Diagnostics.HasError() {
