@@ -58,7 +58,9 @@ resource "metamcp_mcp_server" "filesystem" {
 - `headers` (Map of String, Sensitive) Additional HTTP headers for a remote server. Marked sensitive because these routinely carry credentials.
 - `is_public` (Boolean) Whether the server is public, i.e. usable by every user rather than only its owner.
 
-MetaMCP encodes this as the absence of an owner, so setting it true clears ownership and setting it false claims the server for the authenticated user.
+MetaMCP encodes this as the absence of an owner, so setting it true clears ownership and setting it false claims the server for the authenticated user. Left unset, the server is created private.
+
+A public namespace may only contain public servers, so a namespace's visibility can constrain the servers attached to it. See `metamcp_namespace.is_public`.
 
 The API does not report ownership for servers you do not own, so this is `Optional`+`Computed`: leave it unset to manage the other attributes without touching visibility.
 - `url` (String) Remote MCP endpoint. Required when `type` is `SSE` or `STREAMABLE_HTTP`.

@@ -191,7 +191,11 @@ func (r *mcpServerResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"user rather than only its owner.\n\n" +
 					"MetaMCP encodes this as the absence of an owner, so setting it " +
 					"true clears ownership and setting it false claims the server " +
-					"for the authenticated user.\n\n" +
+					"for the authenticated user. Left unset, the server is created " +
+					"private.\n\n" +
+					"A public namespace may only contain public servers, so a " +
+					"namespace's visibility can constrain the servers attached to " +
+					"it. See `metamcp_namespace.is_public`.\n\n" +
 					"The API does not report ownership for servers you do not own, so " +
 					"this is `Optional`+`Computed`: leave it unset to manage the " +
 					"other attributes without touching visibility.",

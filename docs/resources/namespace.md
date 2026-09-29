@@ -19,11 +19,20 @@ resource "metamcp_mcp_server" "github" {
   name = "github"
   type = "STREAMABLE_HTTP"
   url  = "https://api.githubcopilot.com/mcp/"
+
+  # A public namespace may only contain public servers, so a server
+  # destined for one must be public too. Left unset, a server is
+  # private to the authenticated user.
+  is_public = true
 }
 
 resource "metamcp_namespace" "tools" {
   name        = "tools"
   description = "Shared internal tooling"
+
+  # Left unset, the namespace is private to the authenticated user.
+  # Set true to make it usable by every user on the MetaMCP instance.
+  is_public = true
 
   mcp_server_uuids = [
     metamcp_mcp_server.github.uuid,
@@ -47,7 +56,7 @@ MetaMCP encodes this as the absence of an owner, so setting it true clears owner
 
 The API enforces a relationship rule between the two: a public namespace may only contain public servers. Attaching a private server to a public namespace is refused by the server, so such a change fails with the server's own message.
 
-This is `Optional`+`Computed` because ownership can only be read back, never derived from configuration alone. Left unset, no ownership is sent on create and the namespace is created private for the authenticated user, matching the API's own default.
+This is `Optional`+`Computed` because ownership can only be read back, never derived from configuration alone. Left unset, the namespace is created private for the authenticated user, matching the API's own default.
 - `mcp_server_uuids` (Set of String) UUIDs of the MCP servers associated with this namespace.
 
 Reference `metamcp_mcp_server.<name>.uuid` here to attach a server. Servers are attached by UUID, so this resource does not need to depend on the server's other attributes.

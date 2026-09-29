@@ -85,6 +85,21 @@ because it is not obvious from the names:
 So the shape is: servers → collected into a namespace → published by an
 endpoint → reached with an API key.
 
+### Visibility
+
+Servers and namespaces are each either **private** (the default: usable by their
+owner alone) or **public** (usable by every user). Both take an `is_public`
+attribute, and both default to private when it is left unset.
+
+MetaMCP encodes this as *ownership*: there is no visibility column, and a null
+`user_id` is what makes an object public. So `is_public = true` clears ownership
+and `is_public = false` claims the object for the authenticated user.
+
+One rule links the two: **a public namespace may only contain public servers.**
+Attaching a private server to a public namespace is refused by the API, and the
+refusal surfaces with the server's own message. The practical consequence is
+that a server bound for a public namespace must itself be public.
+
 ## Resources and data sources
 
 | Resource | Purpose |
@@ -106,11 +121,15 @@ resource "metamcp_mcp_server" "github" {
   name = "github"
   type = "STREAMABLE_HTTP"
   url  = "https://api.githubcopilot.com/mcp/"
+
+  # Public, so it may be attached to the public namespace below.
+  is_public = true
 }
 
 resource "metamcp_namespace" "tools" {
   name             = "tools"
   description      = "Shared internal tooling"
+  is_public        = true
   mcp_server_uuids = [metamcp_mcp_server.github.uuid]
 }
 

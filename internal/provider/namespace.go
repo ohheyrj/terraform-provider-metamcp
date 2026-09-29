@@ -114,9 +114,9 @@ func (r *namespaceResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"server to a public namespace is refused by the server, so such a " +
 					"change fails with the server's own message.\n\n" +
 					"This is `Optional`+`Computed` because ownership can only be read " +
-					"back, never derived from configuration alone. Left unset, no " +
-					"ownership is sent on create and the namespace is created private " +
-					"for the authenticated user, matching the API's own default.",
+					"back, never derived from configuration alone. Left unset, the " +
+					"namespace is created private for the authenticated user, " +
+					"matching the API's own default.",
 				PlanModifiers: []planmodifier.Bool{
 					boolplanmodifier.UseStateForUnknown(),
 				},
