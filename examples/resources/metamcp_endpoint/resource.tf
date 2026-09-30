@@ -11,6 +11,10 @@ resource "metamcp_endpoint" "tools" {
 
   enable_api_key_auth = true
   enable_oauth        = false
+
+  # Reachable by every user rather than only this one. A public endpoint may
+  # only publish a public namespace.
+  is_public = true
 }
 
 output "mcp_url" {

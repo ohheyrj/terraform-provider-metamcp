@@ -87,18 +87,38 @@ endpoint → reached with an API key.
 
 ### Visibility
 
-Servers and namespaces are each either **private** (the default: usable by their
-owner alone) or **public** (usable by every user). Both take an `is_public`
-attribute, and both default to private when it is left unset.
+Servers, namespaces and endpoints are each either **private** (the default:
+usable by their owner alone) or **public** (usable by every user). All three take
+an `is_public` attribute, and all three default to private when it is left unset.
 
 MetaMCP encodes this as *ownership*: there is no visibility column, and a null
 `user_id` is what makes an object public. So `is_public = true` clears ownership
 and `is_public = false` claims the object for the authenticated user.
 
-One rule links the two: **a public namespace may only contain public servers.**
-Attaching a private server to a public namespace is refused by the API, and the
-refusal surfaces with the server's own message. The practical consequence is
-that a server bound for a public namespace must itself be public.
+Two rules link the three, and both are enforced by the API rather than by the
+provider:
+
+- **A public namespace may only contain public servers.** Attaching a private
+  server to a public namespace is refused, and the refusal surfaces with the
+  server's own message. The practical consequence is that a server bound for a
+  public namespace must itself be public.
+- **A public endpoint may only publish a public namespace.** Same shape, same
+  message from the server.
+
+An endpoint's visibility also governs who may administer it: the API refuses to
+update or delete an endpoint owned by someone else.
+
+#### Endpoint visibility cannot be changed after creation
+
+This is a limitation of the MetaMCP API, not a choice in the provider. Only
+`endpoints.create` accepts the ownership field; `endpoints.update` never passes
+it on, so an existing endpoint's owner is fixed for its lifetime.
+
+`is_public` on `metamcp_endpoint` therefore forces a **replacement** when it
+changes, rather than silently failing to apply. To change visibility without
+replacing the endpoint, `terraform state rm` it, change it in MetaMCP's own UI,
+then `terraform import` it again — the provider reads ownership back from the
+server either way.
 
 ## Resources and data sources
 
@@ -136,6 +156,9 @@ resource "metamcp_namespace" "tools" {
 resource "metamcp_endpoint" "tools" {
   name           = "tools"
   namespace_uuid = metamcp_namespace.tools.uuid
+
+  # Public, so it may publish the public namespace above.
+  is_public = true
 }
 
 resource "metamcp_api_key" "ci" {
