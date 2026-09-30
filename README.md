@@ -80,22 +80,25 @@ because it is not obvious from the names:
   namespace, and derives its URL from its own name.
 - **`metamcp_api_key`** — a credential for MCP clients. It is scoped to a user,
   **not to an endpoint**: the API has no endpoint field on a key, so one key is
-  not limited to one endpoint.
+  not limited to one endpoint. A key is either private to its owner or public to
+  every user; see [Visibility](#visibility).
 
 So the shape is: servers → collected into a namespace → published by an
 endpoint → reached with an API key.
 
 ### Visibility
 
-Servers, namespaces and endpoints are each either **private** (the default:
-usable by their owner alone) or **public** (usable by every user). All three take
-an `is_public` attribute, and all three default to private when it is left unset.
+Servers, namespaces, endpoints and API keys are each either **private** (the
+default: usable by their owner alone) or **public** (usable by every user). All
+four take an `is_public` attribute and all four default to private when it is
+left unset.
 
 MetaMCP encodes this as *ownership*: there is no visibility column, and a null
 `user_id` is what makes an object public. So `is_public = true` clears ownership
-and `is_public = false` claims the object for the authenticated user.
+and `is_public = false` claims the object for the authenticated user. On API keys
+this is the Public/Private toggle the MetaMCP web UI shows on its API keys page.
 
-Two rules link the three, and both are enforced by the API rather than by the
+Two rules link the four, and both are enforced by the API rather than by the
 provider:
 
 - **A public namespace may only contain public servers.** Attaching a private
@@ -108,17 +111,24 @@ provider:
 An endpoint's visibility also governs who may administer it: the API refuses to
 update or delete an endpoint owned by someone else.
 
-#### Endpoint visibility cannot be changed after creation
+#### Visibility on an endpoint or an API key cannot be changed after creation
 
-This is a limitation of the MetaMCP API, not a choice in the provider. Only
-`endpoints.create` accepts the ownership field; `endpoints.update` never passes
-it on, so an existing endpoint's owner is fixed for its lifetime.
+This is a limitation of the MetaMCP API, not a choice in the provider. Only the
+*create* procedures accept the ownership field; `endpoints.update` and
+`apiKeys.update` never pass it on, so an existing object's owner is fixed for its
+lifetime. (`mcpServers.update` and `namespaces.update` do accept it, so those two
+can be changed in place.)
 
-`is_public` on `metamcp_endpoint` therefore forces a **replacement** when it
-changes, rather than silently failing to apply. To change visibility without
-replacing the endpoint, `terraform state rm` it, change it in MetaMCP's own UI,
-then `terraform import` it again — the provider reads ownership back from the
-server either way.
+`is_public` therefore forces a **replacement** on `metamcp_endpoint` and
+`metamcp_api_key` when it changes, rather than silently failing to apply.
+
+**For an API key that replacement has a consequence worth planning for: a new
+secret is issued and the old one immediately stops working**, so everything
+holding the key must be repointed in the same change. Nothing else about the key
+changes, and no other key is affected — but it will break live clients if they
+are not updated. To change visibility without replacing the key, `terraform state
+rm` it, change it in MetaMCP's own UI, then `terraform import` it again — the
+provider reads ownership back from the server either way.
 
 ## Resources and data sources
 
@@ -163,6 +173,11 @@ resource "metamcp_endpoint" "tools" {
 
 resource "metamcp_api_key" "ci" {
   name = "ci-pipeline"
+
+  # Public, so every MetaMCP user may use it. Omit for private (the default).
+  # Visibility is fixed at creation: the API cannot change it afterwards, so
+  # changing this later replaces the key and issues a NEW secret.
+  is_public = true
 }
 
 output "mcp_url" {

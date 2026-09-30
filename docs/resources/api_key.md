@@ -22,6 +22,15 @@ The generated `key` is a live credential. It is marked sensitive and is also wri
 resource "metamcp_api_key" "ci" {
   name      = "ci-pipeline"
   is_active = true
+
+  # Public: usable by every MetaMCP user, not just its owner. This is the
+  # Public/Private toggle the MetaMCP web UI shows on the API keys page.
+  #
+  # It is set here at creation only — the API cannot change a key's visibility
+  # afterwards, so the provider replaces the key instead, which issues a NEW
+  # secret and invalidates this one. Omit the attribute to keep the key
+  # private (the default).
+  is_public = true
 }
 
 # The key value is returned only when the key is created or listed, and is
@@ -42,6 +51,13 @@ output "ci_key" {
 ### Optional
 
 - `is_active` (Boolean) Whether the key is accepted. Defaults to `true`.
+- `is_public` (Boolean) Whether the key is public, i.e. usable by every user rather than only its owner. **Defaults to `false`, unlike the other resources**: MetaMCP's own create procedure claims a key for the authenticated user when no ownership is given, so an omitted `is_public` yields a private key.
+
+MetaMCP encodes this as the absence of an owner, so setting it `true` clears ownership and setting it `false` claims the key for the authenticated user. This is also the flag the MetaMCP web UI shows as *Public* / *Private* on the API keys page.
+
+**Changing this on an existing key is not supported by the MetaMCP API.** `apiKeys.update` does not accept the ownership field at all, so a key's visibility is settled at creation. The provider asks for a replacement instead — which issues a **new secret and invalidates the old one**, so repoint everything that holds this key. To avoid that, `terraform state rm` the key, change its visibility in MetaMCP's own UI, then `terraform import` it back; the provider reads ownership from the server either way.
+
+This is `Optional`+`Computed` because ownership can only be read back, never derived from configuration alone.
 
 ### Read-Only
 

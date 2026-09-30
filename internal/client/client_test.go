@@ -348,23 +348,174 @@ func TestAPIKeyListEnvelopeDiffers(t *testing.T) {
 	// apiKeys.list returns a bare {apiKeys:[...]} with no success flag, unlike
 	// the other procedures. Decoding it as an envelope would silently yield zero
 	// keys, so this is worth a test of its own.
+	//
+	// It is also the only response that carries user_id, which is what
+	// ownership — and therefore is_public — is read from.
 	ts := newTestServer(t)
 	ts.responders["apiKeys.list"] = map[string]any{
-		"apiKeys": []map[string]any{{
-			"uuid": "99999999-9999-9999-9999-999999999999", "name": "ci",
-			"key": "mmcp_secret_value", "created_at": "2026-01-01",
-			"is_active": true, "user_id": nil,
-		}},
+		"apiKeys": []map[string]any{
+			{
+				"uuid": "99999999-9999-9999-9999-999999999999", "name": "ci",
+				"key": "mmcp_secret_value", "created_at": "2026-01-01",
+				"is_active": true, "user_id": nil,
+			},
+			{
+				"uuid": "88888888-8888-8888-8888-888888888888", "name": "private",
+				"key": "mmcp_other_secret", "created_at": "2026-01-01",
+				"is_active": true, "user_id": "user-1",
+			},
+		},
 	}
 	c := ts.client(t)
 	keys, err := c.ListAPIKeys(context.Background())
 	if err != nil {
 		t.Fatalf("ListAPIKeys: %v", err)
 	}
-	if len(keys) != 1 || keys[0].Secret != "mmcp_secret_value" {
-		t.Fatalf("unexpected keys: %+v", keys)
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d: %+v", len(keys), keys)
+	}
+
+	byName := map[string]APIKey{}
+	for _, k := range keys {
+		byName[k.Name] = k
+	}
+	if got := byName["ci"]; got.Secret != "mmcp_secret_value" || got.UserID != nil {
+		t.Errorf("public key decoded as %+v; want the secret and a nil owner", got)
+	}
+	// user_id is a *string precisely so that a real owner is distinguishable
+	// from an absent field: nil is the value that MEANS public, so a decoder
+	// that flattened an owner to nil would report every key as public.
+	if got := byName["private"]; got.UserID == nil || *got.UserID != "user-1" {
+		t.Errorf("private key decoded with owner %v; want \"user-1\"", got.UserID)
 	}
 }
+
+// TestCreateAPIKeyOmitsOrNullsOwnership pins the three-state ownership encoding
+// on apiKeys.create, which is the ONLY procedure that accepts it. The failure
+// modes are silent, so each direction is asserted against the bytes on the wire
+// rather than against a decoded struct:
+//
+//   - an absent key leaves the field out, so the API's own default applies and
+//     the key is claimed by the caller
+//   - SendNullUserID must reach the server as a literal JSON null
+//   - a real id must be sent verbatim
+//
+// and "" must never appear: user_id is a foreign key to users.id, so the empty
+// string is not NULL and matches no row — Postgres rejects the write, and a
+// client that flattens the server's message turns it into an unexplained
+// failure. A pointer to "" with `omitempty` would drop the key instead, which
+// silently means "leave alone" rather than "make public".
+func TestCreateAPIKeyOmitsOrNullsOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		userID      *string
+		wantPresent bool
+		wantLiteral string
+	}{
+		{"unset sends no ownership", nil, false, ""},
+		{"public sends an explicit null", strPtr(SendNullUserID), true, "null"},
+		{"private sends the user id", strPtr("user-1"), true, `"user-1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			ts.responders["apiKeys.create"] = map[string]any{
+				"uuid": "99999999-9999-9999-9999-999999999999", "name": "ci",
+				"key": "mmcp_secret_value", "created_at": "2026-01-01",
+			}
+			var body string
+			ts.onRequest = func(proc, input string) {
+				if proc == "apiKeys.create" {
+					body = input
+				}
+			}
+			c := ts.client(t)
+			if _, err := c.CreateAPIKey(context.Background(), APIKeyInput{
+				Name:   "ci",
+				UserID: tc.userID,
+			}); err != nil {
+				t.Fatalf("CreateAPIKey: %v", err)
+			}
+			if body == "" {
+				t.Fatal("apiKeys.create was never called")
+			}
+
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+				t.Fatalf("decoding body %s: %v", body, err)
+			}
+			got, present := decoded["user_id"]
+			if present != tc.wantPresent {
+				t.Fatalf("user_id present = %v, want %v (body: %s)", present, tc.wantPresent, body)
+			}
+			if !tc.wantPresent {
+				return
+			}
+			if tc.wantLiteral == "null" && got != nil {
+				t.Errorf("public sent user_id = %#v, want nil (an explicit JSON null)", got)
+			}
+			if tc.wantLiteral == `"user-1"` && got != "user-1" {
+				t.Errorf("user_id = %#v, want \"user-1\"", got)
+			}
+			// The sentinel is an internal encoding, never a value on the wire.
+			if strings.Contains(body, SendNullUserID) {
+				t.Errorf("the public sentinel leaked onto the wire: %s", body)
+			}
+			if strings.Contains(body, `"user_id":""`) {
+				t.Errorf(`user_id was sent as "", which is a foreign-key violation: %s`, body)
+			}
+		})
+	}
+}
+
+// TestUpdateAPIKeyKeepsUUIDAndOmitsOwnership covers the two things that break
+// this call. The uuid must survive the body build — the update path embeds the
+// input struct, so a MarshalJSON method on that type would be promoted and drop
+// the identifier, and the server would then look up a key the request never
+// named. And ownership must NOT be sent at all, because UpdateApiKeyRequestSchema
+// has no such field: sending it would imply an in-place visibility change the
+// API cannot perform.
+func TestUpdateAPIKeyKeepsUUIDAndOmitsOwnership(t *testing.T) {
+	ts := newTestServer(t)
+	// Bare, like CreateApiKeyResponseSchema: the real procedure's
+	// `.output(UpdateApiKeyResponseSchema)` is a plain object with no
+	// {success,data} envelope. Decoding it as an envelope yields an empty uuid,
+	// which the client then reports as "not found" — so this test would fail
+	// with a misleading error rather than a decoding one.
+	ts.responders["apiKeys.update"] = map[string]any{
+		"uuid": "55555555-5555-5555-5555-555555555555", "name": "renamed",
+		"key": "mmcp_secret_value", "created_at": "2026-01-01", "is_active": true,
+	}
+	var body string
+	ts.onRequest = func(proc, input string) {
+		if proc == "apiKeys.update" {
+			body = input
+		}
+	}
+	c := ts.client(t)
+	newName := "renamed"
+	key, err := c.UpdateAPIKey(context.Background(),
+		"55555555-5555-5555-5555-555555555555",
+		APIKeyUpdateInput{Name: &newName})
+	if err != nil {
+		t.Fatalf("UpdateAPIKey: %v", err)
+	}
+	if key.UUID != "55555555-5555-5555-5555-555555555555" {
+		t.Errorf("uuid = %q", key.UUID)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("decoding body %s: %v", body, err)
+	}
+	if decoded["uuid"] != "55555555-5555-5555-5555-555555555555" {
+		t.Errorf("update body lost the uuid: %s", body)
+	}
+	if _, present := decoded["user_id"]; present {
+		t.Errorf("update sent an ownership field the API does not accept: %s", body)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 func TestTRPCErrorSurfaces(t *testing.T) {
 	ts := newTestServer(t)
