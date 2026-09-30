@@ -1,12 +1,16 @@
 # Terraform Provider release workflow.
 name: Release
 
-# This GitHub action creates a release when a tag that matches the pattern
-# "v*" (e.g. v0.1.0) is created.
+# A "v*" tag (e.g. v0.1.0) creates the real GitHub release.
+# workflow_dispatch runs the same pipeline in snapshot mode: it builds and signs
+# the artifacts and prints their names, but creates no release, publishes
+# nothing and needs no tag. Use it to verify the build, the archive naming, the
+# GPG secrets and the signing key before pushing a version tag.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 # Releases need permissions to read and write the repository contents.
 # GitHub considers creating releases and uploading assets as writing contents.
@@ -34,8 +38,29 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          args: release --clean
+          # A tag releases; a manual run builds and signs a snapshot for
+          # inspection. Signing is deliberately NOT skipped either way: an
+          # unsigned snapshot would prove nothing about the release path.
+          args: >-
+            ${{ github.ref_type == 'tag'
+                && 'release --clean'
+                || 'release --snapshot --clean --skip=publish' }}
         env:
           # GitHub sets the GITHUB_TOKEN secret automatically.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+      - name: Show artifacts
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::group::Artifacts produced by the snapshot run"
+          find dist -maxdepth 1 -type f \
+            \( -name '*.zip' -o -name '*SHA256SUMS*' -o -name '*manifest.json' \) \
+            -printf '%f\n' | sort
+          echo "::endgroup::"
+          echo "::group::SHA256SUMS contents (the manifest must be listed)"
+          cat dist/*_SHA256SUMS
+          echo "::endgroup::"
+          echo "::group::Signature must exist and be binary, not armored"
+          ls -l dist/*.sig
+          head -c 1 dist/*_SHA256SUMS.sig | od -An -c
+          echo "::endgroup::"
