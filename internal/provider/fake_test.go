@@ -606,6 +606,26 @@ func (f *fakeMetaMCP) serverField(id, field string) any {
 	return f.servers[id][field]
 }
 
+// seedAPIKey inserts an API key as though it already existed on the real
+// instance — created through the UI, or by an earlier Terraform run whose state
+// is gone. It returns the uuid, which is what `terraform import` takes.
+//
+// Adoption is the case the create-path tests structurally cannot reach: the
+// object's fields were never sent by this provider, so nothing about it agrees
+// with the configuration by construction.
+func (f *fakeMetaMCP) seedAPIKey(fields map[string]any) string {
+	id := f.nextUUID()
+	k := map[string]any{
+		"uuid": id, "name": "seeded", "key": "sk_mt_seeded_" + id,
+		"user_id": fakeUserID, "created_at": "2026-09-01T00:00:00Z", "is_active": true,
+	}
+	for fk, v := range fields {
+		k[fk] = v
+	}
+	f.apiKeys[id] = k
+	return id
+}
+
 // checkStoredAPIKeyOwner asserts the owner the fake has on file for a key.
 //
 // It reads the STORED record rather than any response body, which is what makes
