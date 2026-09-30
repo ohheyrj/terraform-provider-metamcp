@@ -29,6 +29,10 @@ resource "metamcp_endpoint" "tools" {
 
   enable_api_key_auth = true
   enable_oauth        = false
+
+  # Reachable by every user rather than only this one. A public endpoint may
+  # only publish a public namespace.
+  is_public = true
 }
 
 output "mcp_url" {
@@ -50,6 +54,15 @@ output "mcp_url" {
 - `description` (String)
 - `enable_api_key_auth` (Boolean) Allow MCP API keys to authenticate. Defaults to `true`.
 - `enable_oauth` (Boolean) Allow OAuth authentication. Defaults to `false`.
+- `is_public` (Boolean) Whether the endpoint is public, i.e. reachable by every user rather than only its owner.
+
+MetaMCP encodes this as the absence of an owner, so setting it `true` clears ownership and setting it `false` claims the endpoint for the authenticated user. Left unset, the endpoint is created private for the authenticated user.
+
+A public endpoint may only publish a public namespace, so this constrains which namespace the endpoint may point at. The API refuses the combination with its own message. See `metamcp_namespace.is_public`.
+
+**Changing this on an existing endpoint is not supported by the MetaMCP API.** Its update procedure does not accept the ownership field at all — only create does — so ownership is settled when the endpoint is created and cannot be altered afterwards. The provider asks for a replacement instead, which creates a new endpoint and URL. Use `create_mcp_server` to control whether a replacement also creates its companion server. To set visibility without a replacement, `terraform state rm` the endpoint and re-import it after changing it in MetaMCP's own UI — note that import adopts whatever ownership is already there, so this attribute follows the server either way.
+
+This is `Optional`+`Computed` because ownership can only be read back, never derived from configuration alone.
 - `use_query_param_auth` (Boolean) Accept the credential as a query parameter instead of a header.
 
 ### Read-Only

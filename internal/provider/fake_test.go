@@ -44,6 +44,11 @@ type fakeMetaMCP struct {
 	// test can assert on what actually reached the API — necessary for
 	// write-only attributes, whose value is absent from the plan and state.
 	onServerWrite func(proc string, in map[string]any)
+
+	// onEndpointWrite does the same for endpoints. Endpoint visibility has the
+	// same property: what matters is the ownership actually sent, not what
+	// Terraform recorded.
+	onEndpointWrite func(proc string, in map[string]any)
 }
 
 // TestMain opts the whole provider package into the acceptance-test harness.
@@ -169,6 +174,9 @@ func (f *fakeMetaMCP) nextUUID() string {
 func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 	if f.onServerWrite != nil && (proc == "mcpServers.create" || proc == "mcpServers.update") {
 		f.onServerWrite(proc, in)
+	}
+	if f.onEndpointWrite != nil && proc == "endpoints.create" {
+		f.onEndpointWrite(proc, in)
 	}
 	str := func(k string) string {
 		if v, ok := in[k].(string); ok {
@@ -371,7 +379,9 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 			"use_query_param_auth": boolOr(in["useQueryParamAuth"], false),
 			"created_at":           "2026-01-01T00:00:00Z",
 			"updated_at":           "2026-01-01T00:00:00Z",
-			"user_id":              nil,
+			// Ownership: an ABSENT key defaults to the authenticated user, an
+			// explicit null is public. Same rule as a namespace (nsOwner).
+			"user_id": nsOwner(in),
 		}
 		f.endpoints[id] = e
 		return map[string]any{"success": true, "data": e}, nil
@@ -383,7 +393,18 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 			return map[string]any{"success": false, "message": "Endpoint not found"}, nil
 		}
 		e["name"] = str("name")
+		e["namespace_uuid"] = str("namespaceUuid")
+		// The real update passes description straight through to the repository.
+		if v, ok := in["description"]; ok {
+			e["description"] = v
+		}
 		e["updated_at"] = "2026-01-02T00:00:00Z"
+		// user_id is DELIBERATELY ignored here, mirroring the real API: its
+		// update procedure never passes the ownership field to the repository,
+		// so ownership is fixed at creation. A fake that honoured it would make
+		// an in-place visibility change look like it worked, while the live
+		// instance silently kept the old owner — and the resulting
+		// "inconsistent result after apply" could never reproduce here.
 		return map[string]any{"success": true, "data": e}, nil
 
 	case "endpoints.delete":

@@ -444,6 +444,59 @@ type EndpointUpdateInput struct {
 	UserID            *string `json:"user_id,omitempty"`
 }
 
+// bodyWithUUID renders the input as a JSON object with an explicit null user_id
+// when the public sentinel is set.
+//
+// This exists for the same reason as NamespaceInput.bodyWithUUID: a plain
+// struct with `omitempty` cannot express all three states the API distinguishes
+// (absent / a user id / null), and a MarshalJSON method would be promoted to any
+// struct that embeds this one. EndpointUpdateInput is sent by embedding it in a
+// struct that adds the uuid, so a method here would silently drop that uuid and
+// the API would look up an object the request never named.
+//
+// user_id is handled here rather than as a MarshalJSON method for exactly that
+// reason.
+func (in EndpointInput) bodyWithUUID(uuid string) (map[string]any, error) {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if in.UserID != nil && *in.UserID == SendNullUserID {
+		body["user_id"] = nil
+	}
+	if uuid != "" {
+		body["uuid"] = uuid
+	}
+	return body, nil
+}
+
+// bodyWithUUID renders the update input as a JSON object with an explicit null
+// user_id when the public sentinel is set, plus the uuid. See
+// EndpointInput.bodyWithUUID for why this cannot be a MarshalJSON method.
+func (in EndpointUpdateInput) bodyWithUUID(uuid string) (map[string]any, error) {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if in.UserID != nil && *in.UserID == SendNullUserID {
+		body["user_id"] = nil
+	}
+	// namespaceUuid is required by the update schema even though it is not
+	// changing, so it is always sent.
+	if uuid != "" {
+		body["uuid"] = uuid
+	}
+	return body, nil
+}
+
 type endpointEnvelope struct {
 	Success bool      `json:"success"`
 	Message string    `json:"message"`
@@ -482,8 +535,16 @@ func (c *Client) GetEndpoint(ctx context.Context, uuid string) (*Endpoint, error
 
 // CreateEndpoint creates an endpoint.
 func (c *Client) CreateEndpoint(ctx context.Context, in EndpointInput) (*Endpoint, error) {
+	// Must go through bodyWithUUID, not the struct directly: the public
+	// sentinel is a non-empty Go string, so serialising the struct would send it
+	// verbatim as a literal user id instead of an explicit null.
+	body, err := in.bodyWithUUID("")
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for endpoints.create: %w", err)
+	}
+
 	var out endpointEnvelope
-	if err := c.callRaw(ctx, "endpoints.create", in, &out); err != nil {
+	if err := c.callRaw(ctx, "endpoints.create", body, &out); err != nil {
 		return nil, err
 	}
 	if out.Data == nil {
@@ -494,10 +555,10 @@ func (c *Client) CreateEndpoint(ctx context.Context, in EndpointInput) (*Endpoin
 
 // UpdateEndpoint updates an endpoint in place.
 func (c *Client) UpdateEndpoint(ctx context.Context, uuid string, in EndpointUpdateInput) (*Endpoint, error) {
-	body := struct {
-		EndpointUpdateInput
-		UUID string `json:"uuid"`
-	}{EndpointUpdateInput: in, UUID: uuid}
+	body, err := in.bodyWithUUID(uuid)
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for endpoints.update: %w", err)
+	}
 
 	var out endpointEnvelope
 	if err := c.callRaw(ctx, "endpoints.update", body, &out); err != nil {
