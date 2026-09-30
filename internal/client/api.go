@@ -597,6 +597,12 @@ func (c *Client) DeleteEndpoint(ctx context.Context, uuid string) error {
 // response includes the key's secret, which is why the resource treats it as
 // sensitive; the field is named Secret here rather than Key to make that
 // obvious at every use site.
+//
+// UserID is populated ONLY by ListAPIKeys. Neither CreateApiKeyResponseSchema
+// nor UpdateApiKeyResponseSchema carries an ownership field, and a missing JSON
+// field decodes to nil — which here is indistinguishable from the nil that
+// MEANS public. Read ownership back from a list; taken from a create or update
+// response it would report every key as public.
 type APIKey struct {
 	UUID      string  `json:"uuid"`
 	Name      string  `json:"name"`
@@ -608,13 +614,51 @@ type APIKey struct {
 
 // APIKeyInput is CreateApiKeyRequestSchema. The name is restricted to
 // ^[a-zA-Z0-9_\s-]+$ and at most 100 characters.
+//
+// UserID carries the same three-state meaning as it does on a namespace and an
+// endpoint, because apiKeys.create resolves it identically (`input.user_id !==
+// undefined ? input.user_id : userId`): nil is omitted and leaves the API's own
+// default in place, a real id makes the key private to that user, and
+// SendNullUserID asks for an explicit JSON null — which is what makes a key
+// public, since user_id is a foreign key to users.id and "" matches no row.
 type APIKeyInput struct {
 	Name     string  `json:"name"`
 	UserID   *string `json:"user_id,omitempty"`
 	IsActive *bool   `json:"is_active,omitempty"`
 }
 
+// body renders the input as a JSON object with an explicit null user_id when
+// the public sentinel is set.
+//
+// This is a plain function rather than a MarshalJSON method for the reason
+// documented on NamespaceInput: UpdateAPIKey builds its body by EMBEDDING
+// APIKeyUpdateInput in a struct carrying the uuid, and a method on the input
+// type would be promoted to that outer struct and silently drop the uuid.
+func (in APIKeyInput) body() (map[string]any, error) {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	if in.UserID != nil && *in.UserID == SendNullUserID {
+		body["user_id"] = nil
+	}
+	return body, nil
+}
+
 // APIKeyUpdateInput is UpdateApiKeyRequestSchema.
+//
+// There is deliberately no UserID field: UpdateApiKeyRequestSchema does not
+// accept one, and the update implementation never passes ownership to the
+// repository, so a key's ownership is fixed when it is created. Exposing the
+// field here would suggest a capability the API does not have.
+//
+// Note also that the response's `key` IS returned by this procedure
+// (UpdateApiKeyResponseSchema includes it), unlike what an earlier comment
+// here claimed.
 type APIKeyUpdateInput struct {
 	Name     *string `json:"name,omitempty"`
 	IsActive *bool   `json:"is_active,omitempty"`
@@ -641,11 +685,18 @@ func (c *Client) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	return out.APIKeys, nil
 }
 
-// CreateAPIKey creates an API key and returns it, including its secret. The
-// secret is returned only here and by list — never in an update.
+// CreateAPIKey creates an API key and returns it, including its secret.
+//
+// CreateApiKeyResponseSchema = {uuid, name, key, created_at} — there is no
+// ownership field and no is_active, so neither can be read back from this
+// response. Ownership in particular must come from ListAPIKeys; see APIKey.
 func (c *Client) CreateAPIKey(ctx context.Context, in APIKeyInput) (*APIKey, error) {
+	body, err := in.body()
+	if err != nil {
+		return nil, fmt.Errorf("metamcp: encoding input for apiKeys.create: %w", err)
+	}
 	var out APIKey
-	if err := c.callRaw(ctx, "apiKeys.create", in, &out); err != nil {
+	if err := c.callRaw(ctx, "apiKeys.create", body, &out); err != nil {
 		return nil, err
 	}
 	if out.UUID == "" {
@@ -655,6 +706,9 @@ func (c *Client) CreateAPIKey(ctx context.Context, in APIKeyInput) (*APIKey, err
 }
 
 // UpdateAPIKey updates an API key's name and active flag.
+//
+// Ownership is not sent, because UpdateApiKeyRequestSchema has no ownership
+// field: a key's visibility is settled at creation and cannot be changed here.
 func (c *Client) UpdateAPIKey(ctx context.Context, uuid string, in APIKeyUpdateInput) (*APIKey, error) {
 	body := struct {
 		APIKeyUpdateInput

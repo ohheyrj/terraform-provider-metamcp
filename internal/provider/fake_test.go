@@ -30,6 +30,11 @@ import (
 // it expects on anything made private.
 const fakeUserID = "user-0000-1111-2222-3333"
 
+// otherUserID stands in for a second, unrelated user. It exists so a test can ask
+// the question visibility actually answers — can somebody else use this object?
+// — rather than only inspecting the stored owner column.
+const otherUserID = "user-9999-8888-7777-6666"
+
 type fakeMetaMCP struct {
 	*httptest.Server
 
@@ -49,6 +54,12 @@ type fakeMetaMCP struct {
 	// same property: what matters is the ownership actually sent, not what
 	// Terraform recorded.
 	onEndpointWrite func(proc string, in map[string]any)
+
+	// onAPIKeyWrite does the same for API keys. It matters here more than
+	// anywhere: an API key's ownership is settable ONLY at creation, so "what
+	// did the create request actually carry" is the only evidence that
+	// is_public did anything at all.
+	onAPIKeyWrite func(proc string, in map[string]any)
 }
 
 // TestMain opts the whole provider package into the acceptance-test harness.
@@ -177,6 +188,9 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 	}
 	if f.onEndpointWrite != nil && proc == "endpoints.create" {
 		f.onEndpointWrite(proc, in)
+	}
+	if f.onAPIKeyWrite != nil && (proc == "apiKeys.create" || proc == "apiKeys.update") {
+		f.onAPIKeyWrite(proc, in)
 	}
 	str := func(k string) string {
 		if v, ok := in[k].(string); ok {
@@ -413,6 +427,9 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 
 	case "apiKeys.list":
 		// Odd one out: this procedure returns {apiKeys:[...]} with no envelope.
+		// It is also the ONLY procedure that reports ownership for a key —
+		// neither create nor update returns a user_id field — which is what
+		// makes the provider's read path the only correct source for is_public.
 		list := []any{}
 		for _, k := range f.apiKeys {
 			list = append(list, k)
@@ -422,16 +439,28 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 	case "apiKeys.create":
 		id := f.nextUUID()
 		// The key value is returned once, at creation, and never again.
+		//
+		// Ownership follows api-keys.impl.ts exactly: `input.user_id !== undefined
+		// ? input.user_id : userId` — the same rule the namespace and endpoint
+		// create paths use. An ABSENT ownership key claims the caller, and an
+		// explicit null makes the key public.
+		//
+		// A fake that defaulted an absent key to nil would make an omitted
+		// is_public look public, when the real API stores it private; and one
+		// that refused the null would hide the fact that public keys are
+		// creatable at all.
+		owner := apiKeyOwner(in)
 		k := map[string]any{
 			"uuid": id, "name": str("name"),
 			"key":        "fake-key-" + id,
-			"user_id":    nil,
+			"user_id":    owner,
 			"created_at": "2026-01-01T00:00:00Z",
-			"is_active":  true,
+			"is_active":  boolOr(in["is_active"], true),
 		}
 		f.apiKeys[id] = k
 		// Bare, like the real API: apiKeys.create returns
-		// CreateApiKeyResponseSchema directly with no {success,data} envelope.
+		// CreateApiKeyResponseSchema ({uuid, name, key, created_at}) directly,
+		// with no {success,data} envelope and no ownership field.
 		// (apiKeys.list is the other odd one out.)
 		return map[string]any{
 			"uuid": k["uuid"], "name": k["name"], "key": k["key"],
@@ -451,11 +480,35 @@ func (f *fakeMetaMCP) handle(proc string, in map[string]any) (any, error) {
 		if !ok {
 			return map[string]any{"success": false, "message": "API key not found"}, nil
 		}
-		k["name"] = str("name")
+		// UpdateApiKeyRequestSchema is {uuid, name?, is_active?}. Every optional
+		// field follows the API's rule — absent means keep, present replaces —
+		// so a provider that omitted the name must not have the stored one
+		// overwritten with "".
+		//
+		// There is deliberately NO ownership handling: the real update procedure
+		// never passes user_id to the repository, so a provider that tried to
+		// change a key's visibility in place would have its mistake silently
+		// ignored against the live server. Modelling that here is what makes the
+		// in-place failure reproducible locally instead of only in production.
+		if v, ok := in["name"]; ok {
+			k["name"] = v
+		}
 		if v, ok := in["isActive"].(bool); ok {
 			k["is_active"] = v
 		}
-		return map[string]any{"success": true, "data": k}, nil
+		// UpdateApiKeyResponseSchema DOES include the key, but not user_id. The
+		// response is built as a separate map so that omitting or reshaping a
+		// field here can never mutate what the fake has stored.
+		//
+		// Returned BARE, with no {success,data} wrapper: the real procedure's
+		// `.output(UpdateApiKeyResponseSchema)` is a plain object, exactly like
+		// apiKeys.create. This was previously wrapped, which meant every update
+		// decoded to an empty uuid and the client reported "not found" — a bug
+		// that lived in the fake and hid a genuine provider failure.
+		return map[string]any{
+			"uuid": k["uuid"], "name": k["name"], "key": k["key"],
+			"created_at": k["created_at"], "is_active": k["is_active"],
+		}, nil
 
 	case "apiKeys.delete":
 		delete(f.apiKeys, str("uuid"))
@@ -553,6 +606,47 @@ func (f *fakeMetaMCP) serverField(id, field string) any {
 	return f.servers[id][field]
 }
 
+// checkStoredAPIKeyOwner asserts the owner the fake has on file for a key.
+//
+// It reads the STORED record rather than any response body, which is what makes
+// it able to catch a provider that took ownership from the create response: the
+// storage path is set from the request, so the two cannot agree by accident.
+func (f *fakeMetaMCP) checkStoredAPIKeyOwner(uuid string, wantPublic bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.apiKeys[uuid]
+	if !ok {
+		return fmt.Errorf("no API key stored under uuid %s", uuid)
+	}
+	owner := k["user_id"]
+	if wantPublic && owner != nil {
+		return fmt.Errorf("key %s has owner %#v, want no owner (public)", uuid, owner)
+	}
+	if !wantPublic && owner == nil {
+		return fmt.Errorf("key %s has no owner, want one (private)", uuid)
+	}
+	return nil
+}
+
+// checkAPIKeyAccess reports whether a key would be returned to a DIFFERENT user,
+// mirroring the API's own findAccessibleToUser rule: public keys (no owner) plus
+// the caller's own. This is the access consequence of visibility, as opposed to
+// the stored column.
+func (f *fakeMetaMCP) checkAPIKeyAccess(uuid string, wantVisible bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.apiKeys[uuid]
+	if !ok {
+		return fmt.Errorf("no API key stored under uuid %s", uuid)
+	}
+	visible := k["user_id"] == nil || k["user_id"] == otherUserID
+	if visible != wantVisible {
+		return fmt.Errorf("key %s visible to other user = %v, want %v (owner %#v)",
+			uuid, visible, wantVisible, k["user_id"])
+	}
+	return nil
+}
+
 // nsOwner mirrors the API's create rule: `input.user_id !== undefined ?
 // input.user_id : userId`. An absent key defaults to the authenticated user, an
 // explicit null makes the namespace public.
@@ -561,6 +655,16 @@ func nsOwner(in map[string]any) any {
 		return ownerFor(v)
 	}
 	return fakeUserID
+}
+
+// apiKeyOwner mirrors apiKeys.create's own resolution.
+//
+// It is the SAME rule as nsOwner, and that is worth stating because it is easy
+// to assume otherwise: api-keys.impl.ts computes exactly `input.user_id !==
+// undefined ? input.user_id : userId`, so an explicit null really does create a
+// public key. An absent key claims the caller.
+func apiKeyOwner(in map[string]any) any {
+	return nsOwner(in)
 }
 
 // checkNamespaceServerVisibility enforces the API's relationship rule: a public
